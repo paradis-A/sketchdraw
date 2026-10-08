@@ -555,7 +555,7 @@ function render() {
     for (let x = ox; x < view.w; x += step) for (let y = oy; y < view.h; y += step) ctx.fillRect(x - .75, y - .75, 1.5, 1.5);
   }
   ctx.setTransform(D * z, 0, 0, D * z, D * S.cam.x, D * S.cam.y);
-  for (const l of S.doc.layers) if (l.visible) drawShapes(ctx, l.shapes, l.opacity / 100, S.editing && S.editing.shape && S.editing.shape.id);
+  for (const l of S.doc.layers) if (l.visible) drawShapes(ctx, l.shapes, l.opacity / 100, S.editing && S.editing.mode === 'text' && S.editing.shape.id);
 
   const lw = 1.5 / z;
   // selection
