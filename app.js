@@ -7,7 +7,6 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const f = n => +n.toFixed(2);
 const clone = o => JSON.parse(JSON.stringify(o));
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const dpr = () => window.devicePixelRatio || 1;
 
 const ICONS = {
@@ -95,10 +94,10 @@ const TOOLS = [
   { id: 'hand', icon: 'hand', key: 'h', name: 'Pan' },
   { gap: 1 },
   { id: 'rect', icon: 'rect', type: 'rect', key: 'r', name: 'Rectangle (sharp corners)' },
-  { id: 'square', icon: 'square', type: 'rect', eq: 1, key: 's', name: 'Square (sharp corners)' },
-  { id: 'rounded', icon: 'rounded', type: 'rect', round: 1, key: 'u', name: 'Rounded rectangle' },
+  { id: 'square', label: 'Square', icon: 'square', type: 'rect', eq: 1, key: 's', name: 'Square (sharp corners)' },
+  { id: 'rounded', label: 'Rounded rect', icon: 'rounded', type: 'rect', round: 1, key: 'u', name: 'Rounded rectangle' },
   { id: 'oval', icon: 'oval', type: 'ellipse', key: 'o', name: 'Oval / ellipse' },
-  { id: 'circle', icon: 'circle', type: 'ellipse', eq: 1, key: 'c', name: 'Circle' },
+  { id: 'circle', label: 'Circle', icon: 'circle', type: 'ellipse', eq: 1, key: 'c', name: 'Circle' },
   { id: 'diamond', icon: 'diamond', type: 'diamond', key: 'd', name: 'Diamond' },
   { id: 'triangle', icon: 'triangle', type: 'triangle', key: 'g', name: 'Triangle' },
   { id: 'hexagon', icon: 'hexagon', type: 'hexagon', key: 'x', name: 'Hexagon' },
@@ -290,26 +289,36 @@ function drawShape(ctx, s, alpha = 1) {
 }
 const drawShapes = (ctx, shapes, alpha = 1, skip) => { for (const s of shapes) if (s.id !== skip) drawShape(ctx, s, alpha); };
 
-function shapeSVG(s, a) {
-  const op = f(a * (s.op ?? 100) / 100);
-  const opAttr = op < 1 ? ` opacity="${op}"` : '';
-  if (s.type === 'text') {
-    const m = textMetrics(s);
-    const tsp = m.lines.map((l, i) => `<tspan x="${f(s.x)}" y="${f(s.y + i * s.fs * 1.25 + s.fs * ASC + s.fs * 0.1)}">${esc(l)}</tspan>`).join('');
-    return `<text font-size="${s.fs}" font-family='${(FONTS[s.font] || FONTS.sans).replace(/"/g, "'")}' fill="${s.fill || s.stroke || '#1e1e1e'}" xml:space="preserve"${opAttr}>${tsp}</text>`;
-  }
-  const fill = s.fill && fillable(s) ? s.fill : 'none';
-  const hasStroke = s.stroke && s.sw > 0;
-  let a2 = `d="${pathD(s)}" fill="${fill}"`;
-  if (hasStroke) {
-    a2 += ` stroke="${s.stroke}" stroke-width="${s.sw}" stroke-linecap="${capOf(s)}" stroke-linejoin="${joinOf(s)}"`;
-    const da = dashArr(s);
-    if (da.length) a2 += ` stroke-dasharray="${da.join(' ')}"`;
-  }
-  return `<path ${a2}${opAttr}/>`;
-}
-
 /* ============================== document helpers ============================== */
+const LABELS = { rect: 'Rectangle', ellipse: 'Oval', diamond: 'Diamond', triangle: 'Triangle', hexagon: 'Hexagon', star: 'Star', line: 'Line', arrow: 'Arrow', free: 'Brush', path: 'Path', text: 'Text' };
+function layerLabel(s, tool) {
+  let base = (tool && tool.label) || LABELS[s.type] || 'Shape';
+  if (s.type === 'text') base = 'Text';
+  const n = S.doc.layers.filter(l => l.name.startsWith(base + ' ')).length + 1;
+  return `${base} ${n}`;
+}
+// every element lives on its own layer, inserted above the active one (like Photoshop)
+function addShape(s, tool, below) {
+  const empty = !below && activeLayer().shapes.length === 0 ? activeLayer() : null;
+  if (empty) { empty.name = layerLabel(s, tool); empty.shapes.push(s); return empty; }
+  const l = newLayer(layerLabel(s, tool));
+  l.shapes.push(s);
+  const at = below ? S.doc.layers.indexOf(below) + 1 : S.doc.layers.indexOf(activeLayer()) + 1;
+  S.doc.layers.splice(at, 0, l);
+  S.doc.active = l.id;
+  return l;
+}
+function removeShape(s) {
+  const o = findShape(s.id); if (!o) return;
+  o.l.shapes.splice(o.l.shapes.indexOf(s), 1);
+  S.sel.delete(s.id);
+  if (!o.l.shapes.length) {
+    const i = S.doc.layers.indexOf(o.l);
+    S.doc.layers.splice(i, 1);
+    if (!S.doc.layers.length) S.doc.layers.push(newLayer('Layer 1'));
+    if (S.doc.active === o.l.id) S.doc.active = S.doc.layers[Math.max(0, i - 1)].id;
+  }
+}
 const layerById = id => S.doc.layers.find(l => l.id === id);
 const activeLayer = () => layerById(S.doc.active) || S.doc.layers[S.doc.layers.length - 1];
 function findShape(id) {
@@ -517,14 +526,6 @@ function renderExportCanvas() {
   for (const g of groups) drawShapes(x, g.shapes, g.a);
   return c;
 }
-function buildSVG() {
-  const groups = exportGroups(), r = exportRegion(groups);
-  if (!r) return null;
-  let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${r.w}" height="${r.h}" viewBox="${r.x} ${r.y} ${r.w} ${r.h}">\n`;
-  if (S.exp.bg) out += `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="#ffffff"/>\n`;
-  for (const g of groups) for (const s of g.shapes) out += shapeSVG(s, g.a) + '\n';
-  return out + '</svg>\n';
-}
 function download(blob, name) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
@@ -548,17 +549,6 @@ function savePNG() {
   if (!c) return toast('Nothing to export');
   c.toBlob(b => download(b, 'sketch.png'));
   toast(`Saved PNG · ${c.width}×${c.height}`);
-}
-function saveSVG() {
-  const s = buildSVG();
-  if (!s) return toast('Nothing to export');
-  download(new Blob([s], { type: 'image/svg+xml' }), 'sketch.svg');
-  toast('Saved SVG');
-}
-async function copySVG() {
-  const s = buildSVG();
-  if (!s) return toast('Nothing to export');
-  try { await navigator.clipboard.writeText(s); toast('Copied SVG code'); } catch (e) { toast('Clipboard blocked by the browser'); }
 }
 function flash(btn) {
   if (!btn) return;
@@ -700,7 +690,7 @@ topbar.append(
   mkBtn('ib', 'redo', 'Redo (Ctrl+Shift+Z)', redo, 'b-redo'),
   sepEl(),
   mkBtn('ib', 'open', 'Open project…', () => $('#openfile').click()),
-  mkBtn('ib', icon('save') + '<small>.json</small>', 'Save project file', saveProject),
+  mkBtn('ib', 'save', 'Save project file (.json)', saveProject),
   mkBtn('ib', 'trash', 'Clear everything', () => { if (confirm('Clear all layers and start over?')) newDoc(); }),
 );
 function updateTopbar() {
@@ -730,10 +720,8 @@ $('#openfile').addEventListener('change', async e => {
 // export bar
 const exportbar = $('#exportbar');
 exportbar.append(
-  mkBtn('ib primary', 'copy', 'Copy image to clipboard (Ctrl+Shift+C)', copyPNG, 'b-copy'),
-  mkBtn('ib', icon('save') + '<small>PNG</small>', 'Download PNG', savePNG),
-  mkBtn('ib', icon('save') + '<small>SVG</small>', 'Download SVG', saveSVG),
-  mkBtn('ib', icon('copy') + '<small>SVG</small>', 'Copy SVG code', copySVG),
+  mkBtn('ib', 'copy', 'Copy image to clipboard (Ctrl+Shift+C)', copyPNG, 'b-copy'),
+  mkBtn('ib', 'save', 'Download PNG', savePNG),
   sepEl(),
   mkBtn('ib', 'bg', 'Background: white (on) / transparent (off)', () => { S.exp.bg = !S.exp.bg; syncExport(); redraw(); persist(); }, 'b-bg'),
   mkBtn('ib', 'selonly', 'Export only the selection', () => { S.exp.selOnly = !S.exp.selOnly; syncExport(); redraw(); persist(); }, 'b-selonly'),
@@ -840,7 +828,6 @@ arrange.append(
   mkBtn('ib', 'forward', 'Bring forward (Ctrl+])', () => reorder('fwd')),
   mkBtn('ib', 'backward', 'Send backward (Ctrl+[)', () => reorder('back')),
   mkBtn('ib', 'toback', 'Send to back (Ctrl+Shift+[)', () => reorder('bottom')),
-  mkBtn('ib', 'tolayer', 'Move selection to the active layer', moveToActiveLayer),
   mkBtn('ib', 'copy', 'Duplicate (Ctrl+D)', duplicateSel),
   mkBtn('ib', 'trash', 'Delete (Del)', deleteSel),
 );
@@ -879,6 +866,7 @@ function refreshProps() {
   $('#sec-join').style.display = types.some(t => BOX.has(t)) ? '' : 'none';
   $('#sec-text').style.display = types.includes('text') ? '' : 'none';
   $('#sec-arr').style.display = first ? '' : 'none';
+  markLayers();
 }
 
 /* ============================== UI: layers ============================== */
@@ -894,19 +882,31 @@ function thumb(layer) {
   }
   return c;
 }
+const layerOn = l => l.shapes.some(x => S.sel.has(x.id)) || (!S.sel.size && l.id === S.doc.active);
+function markLayers() {
+  for (const row of layerList.children) { const l = layerById(row.dataset.id); if (l) row.classList.toggle('active', layerOn(l)); }
+  const a = activeLayer();
+  $('#layer-op').value = a.opacity; $('#layer-op-v').textContent = a.opacity + '%';
+}
 function refreshLayers() {
   layerList.innerHTML = '';
   const layers = S.doc.layers;
   for (let i = layers.length - 1; i >= 0; i--) {
     const l = layers[i];
     const row = document.createElement('div');
-    row.className = 'layer' + (l.id === S.doc.active ? ' active' : '') + (l.visible ? '' : ' hidden');
+    row.className = 'layer' + (layerOn(l) ? ' active' : '') + (l.visible ? '' : ' hidden');
     row.draggable = true; row.dataset.id = l.id;
     const eye = mkBtn('ib' + (l.visible ? '' : ' off'), l.visible ? 'eye' : 'eyeoff', 'Show / hide', ev => { ev.stopPropagation(); l.visible = !l.visible; commit(); });
     const lock = mkBtn('ib' + (l.locked ? '' : ' off'), l.locked ? 'lock' : 'unlock', 'Lock / unlock', ev => { ev.stopPropagation(); l.locked = !l.locked; if (l.locked) for (const s of l.shapes) S.sel.delete(s.id); commit(); });
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = l.name;
     row.append(eye, thumb(l), nm, lock);
-    row.onclick = () => { S.doc.active = l.id; refreshLayers(); };
+    row.onclick = ev => {
+      S.doc.active = l.id;
+      const ids = l.visible && !l.locked ? l.shapes.map(x => x.id) : [];
+      if (ev.shiftKey || ev.ctrlKey || ev.metaKey) ids.forEach(id => (S.sel.has(id) ? S.sel.delete(id) : S.sel.add(id)));
+      else S.sel = new Set(ids);
+      refreshProps(); redraw(false);
+    };
     nm.ondblclick = ev => {
       ev.stopPropagation();
       const inp = document.createElement('input'); inp.className = 'rename'; inp.value = l.name;
@@ -968,29 +968,21 @@ $('#pv-actions').append(
 
 /* ============================== editing actions ============================== */
 function reorder(mode) {
-  for (const l of S.doc.layers) {
-    const arr = l.shapes, isSel = s => S.sel.has(s.id);
-    if (!arr.some(isSel)) continue;
-    if (mode === 'front') l.shapes = [...arr.filter(s => !isSel(s)), ...arr.filter(isSel)];
-    else if (mode === 'bottom') l.shapes = [...arr.filter(isSel), ...arr.filter(s => !isSel(s))];
-    else if (mode === 'fwd') for (let i = arr.length - 2; i >= 0; i--) { if (isSel(arr[i]) && !isSel(arr[i + 1])) [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]]; }
-    else for (let i = 1; i < arr.length; i++) { if (isSel(arr[i]) && !isSel(arr[i - 1])) [arr[i], arr[i - 1]] = [arr[i - 1], arr[i]]; }
-  }
-  commit();
-}
-function moveToActiveLayer() {
-  const dst = activeLayer();
-  if (dst.locked) return toast('Active layer is locked');
-  for (const { s, l } of selList()) if (l !== dst) { l.shapes.splice(l.shapes.indexOf(s), 1); dst.shapes.push(s); }
+  const arr = S.doc.layers, isSel = l => l.shapes.some(x => S.sel.has(x.id));
+  if (!arr.some(isSel)) return;
+  if (mode === 'front') S.doc.layers = [...arr.filter(l => !isSel(l)), ...arr.filter(isSel)];
+  else if (mode === 'bottom') S.doc.layers = [...arr.filter(isSel), ...arr.filter(l => !isSel(l))];
+  else if (mode === 'fwd') for (let i = arr.length - 2; i >= 0; i--) { if (isSel(arr[i]) && !isSel(arr[i + 1])) [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]]; }
+  else for (let i = 1; i < arr.length; i++) { if (isSel(arr[i]) && !isSel(arr[i - 1])) [arr[i], arr[i - 1]] = [arr[i - 1], arr[i]]; }
   commit();
 }
 function deleteSel() {
-  for (const { s, l } of selList()) l.shapes.splice(l.shapes.indexOf(s), 1);
+  selShapes().forEach(removeShape);
   S.sel.clear(); commit();
 }
 function duplicateSel() {
   const out = [];
-  for (const { s, l } of selList()) { const d = clone(s); d.id = uid(); moveShape(d, 16, 16); l.shapes.push(d); out.push(d.id); }
+  for (const { s, l } of selList()) { const d = clone(s); d.id = uid(); moveShape(d, 16, 16); const nl = addShape(d, null, l); nl.name = l.name + ' copy'; out.push(d.id); }
   S.sel = new Set(out); commit();
 }
 function copySel() { S.clip = selList().map(({ s, l }) => ({ layer: l.id, shape: clone(s) })); S.pasteN = 0; if (S.clip.length) toast('Copied'); }
@@ -999,9 +991,8 @@ function pasteSel() {
   S.pasteN = (S.pasteN || 0) + 1;
   const out = [];
   for (const c of S.clip) {
-    const l = (layerById(c.layer) && !layerById(c.layer).locked) ? layerById(c.layer) : activeLayer();
     const d = clone(c.shape); d.id = uid(); moveShape(d, 16 * S.pasteN, 16 * S.pasteN);
-    l.shapes.push(d); out.push(d.id);
+    addShape(d); out.push(d.id);
   }
   S.sel = new Set(out); commit();
 }
@@ -1035,11 +1026,11 @@ function commitText() {
   const t = ta.value.replace(/\s+$/, '');
   if (ed.shape) {
     if (t) ed.shape.text = t;
-    else { const o = findShape(ed.shape.id); if (o) o.l.shapes.splice(o.l.shapes.indexOf(o.s), 1); S.sel.delete(ed.shape.id); }
+    else removeShape(ed.shape);
   } else if (t) {
-    const l = activeLayer();
     const s = { id: uid(), type: 'text', x: ed.x, y: ed.y, text: t, fs: ed.base.fs, font: ed.base.font, fill: ed.base.fill, stroke: ed.base.fill, sw: 0, op: S.style.op, dash: 'solid' };
-    l.shapes.push(s); S.sel = new Set([s.id]);
+    const l = addShape(s); l.name = 'Text: ' + (t.split('\n')[0].slice(0, 18));
+    S.sel = new Set([s.id]);
   }
   commit();
   if (!ed.shape && t) afterCreate();
@@ -1052,17 +1043,11 @@ function finishPen(closed) {
   const st = S.style;
   const s = { id: uid(), type: 'path', nodes: d.nodes.map(n => ({ x: n.x, y: n.y, ox: n.ox || 0, oy: n.oy || 0 })), closed: !!closed,
     stroke: st.stroke || st.fill || '#1e1e1e', fill: st.fill, sw: Math.max(1, st.sw), dash: st.dash, op: st.op, join: 'round' };
-  activeLayer().shapes.push(s);
+  addShape(s);
   S.sel = new Set([s.id]); commit(); afterCreate();
 }
 
 /* ============================== pointer interaction ============================== */
-function canDrawOnActive() {
-  const l = activeLayer();
-  if (!l.visible) { toast('The active layer is hidden'); return false; }
-  if (l.locked) { toast('The active layer is locked'); return false; }
-  return true;
-}
 function mkShape(tool, x, y) {
   const st = S.style;
   const base = { id: uid(), sw: st.sw, dash: st.dash, op: st.op, join: st.join };
@@ -1156,11 +1141,9 @@ board.addEventListener('pointerdown', e => {
     const hit = pickAt(wp.x, wp.y);
     e.preventDefault();
     if (hit && hit.s.type === 'text') { S.sel = new Set([hit.s.id]); openText(hit.s); }
-    else if (canDrawOnActive()) openText(null, { x: snap(wp.x), y: snap(wp.y) });
+    else openText(null, { x: snap(wp.x), y: snap(wp.y) });
     return;
   }
-  if (!canDrawOnActive()) return;
-
   if (S.tool === 'pen') {
     if (!S.draft) S.draft = { nodes: [], cursor: null };
     const d = S.draft;
@@ -1176,12 +1159,12 @@ board.addEventListener('pointerdown', e => {
   if (S.tool === 'brush') {
     const st = S.style;
     const s = { id: uid(), type: 'free', pts: [{ x: wp.x, y: wp.y }], closed: false, stroke: st.stroke || st.fill || '#1e1e1e', fill: st.fill, sw: Math.max(1, st.sw), dash: st.dash, op: st.op, join: 'round' };
-    activeLayer().shapes.push(s); S.drag = { k: 'brush', s }; S.sel.clear(); redraw(false); return;
+    addShape(s, TOOLS.find(t => t.id === 'brush')); S.drag = { k: 'brush', s }; S.sel.clear(); redraw(false); return;
   }
   if (tool && tool.type) {
     const p = { x: snap(wp.x), y: snap(wp.y) };
     const s = mkShape(tool, p.x, p.y);
-    activeLayer().shapes.push(s);
+    addShape(s, tool);
     S.sel = new Set([s.id]);
     S.drag = { k: 'create', s, tool, start: p };
     redraw(false);
@@ -1190,7 +1173,7 @@ board.addEventListener('pointerdown', e => {
 
 function eraseAt(wp) {
   const hit = pickAt(wp.x, wp.y);
-  if (hit) { hit.l.shapes.splice(hit.l.shapes.indexOf(hit.s), 1); S.sel.delete(hit.s.id); S.drag.n++; redraw(); }
+  if (hit) { removeShape(hit.s); S.drag.n++; redraw(); }
 }
 
 board.addEventListener('pointermove', e => {
@@ -1296,7 +1279,7 @@ function endDrag() {
       const s = d.s;
       const tiny = s.pts ? Math.hypot(s.pts[1].x - s.pts[0].x, s.pts[1].y - s.pts[0].y) < 3 : (s.w < 2 && s.h < 2);
       if (tiny) { // plain click: drop a default-sized shape
-        if (s.pts) { const l = activeLayer(); l.shapes.splice(l.shapes.indexOf(s), 1); S.sel.clear(); redraw(); break; }
+        if (s.pts) { removeShape(s); S.sel.clear(); redraw(); break; }
         const size = S.grid.on ? S.grid.size * 4 : 80;
         s.w = size; s.h = d.tool.id === 'oval' || d.tool.id === 'rect' || d.tool.id === 'rounded' ? Math.round(size * 0.65) : size;
         if (S.grid.on) s.h = Math.max(s.h, S.grid.size);
@@ -1352,7 +1335,7 @@ window.addEventListener('keydown', e => {
     else if (k === 'c') { copySel(); }
     else if (k === 'v') { pasteSel(); }
     else if (k === 'x') { copySel(); deleteSel(); }
-    else if (k === 'a') { e.preventDefault(); S.sel = new Set(activeLayer().locked ? [] : activeLayer().shapes.map(s => s.id)); refreshProps(); redraw(false); }
+    else if (k === 'a') { e.preventDefault(); S.sel = new Set(S.doc.layers.filter(l => l.visible && !l.locked).flatMap(l => l.shapes.map(s => s.id))); refreshProps(); redraw(false); }
     else if (k === 's') { e.preventDefault(); saveProject(); }
     else if (e.key === ']') { e.preventDefault(); reorder(e.shiftKey ? 'front' : 'fwd'); }
     else if (e.key === '[') { e.preventDefault(); reorder(e.shiftKey ? 'bottom' : 'back'); }
