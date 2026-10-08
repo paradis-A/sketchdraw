@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>SketchDraw</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <main id="stage">
+    <canvas id="board"></canvas>
+    <textarea id="texted" hidden spellcheck="false"></textarea>
+    <div id="toolbar" class="float"></div>
+    <div id="props" class="float"></div>
+    <div id="topbar" class="float"></div>
+    <div id="exportbar" class="float"></div>
+    <div id="zoombar" class="float"></div>
+    <div id="hint"></div>
+    <div id="toast"></div>
+  </main>
+  <aside id="side">
+    <section id="layers-panel">
+      <header><h2>Layers</h2><div class="op-row"><span>Opacity</span><input type="range" id="layer-op" min="0" max="100"><b id="layer-op-v">100%</b></div></header>
+      <div id="layer-list"></div>
+      <footer id="layer-actions"></footer>
+    </section>
+    <section id="preview-panel">
+      <header><h2>Export preview</h2><span id="pv-info"></span></header>
+      <div id="pv-wrap"><canvas id="pv"></canvas></div>
+      <footer id="pv-actions"></footer>
+    </section>
+  </aside>
+</div>
+<input type="file" id="openfile" accept=".json,.sketchdraw" hidden>
+<script src="app.js"></script>
+</body>
+</html>
