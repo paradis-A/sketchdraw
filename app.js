@@ -55,10 +55,22 @@ const ICONS = {
   alignl: '<path d="M4 6h16M4 12h10M4 18h14"/>',
   alignc: '<path d="M4 6h16M7 12h10M5 18h14"/>',
   alignr: '<path d="M4 6h16M10 12h10M6 18h14"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M21 16l-5-5-8 9"/>',
   tolayer: '<path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/>',
 };
 const icon = (n, size = 20) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n]}</svg>`;
 
+const imgCache = new Map();
+function getImg(id) {
+  let im = imgCache.get(id);
+  if (!im) {
+    im = new Image();
+    im.onload = () => redraw();
+    im.src = (S.images && S.images[id]) || '';
+    imgCache.set(id, im);
+  }
+  return im.complete && im.naturalWidth ? im : null;
+}
 const FONTS = {
   sans: 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif',
   serif: 'Georgia, "Times New Roman", serif',
@@ -73,6 +85,7 @@ const newLayer = name => ({ id: uid(), name, visible: true, locked: false, opaci
 
 const S = {
   doc: { layers: [], active: null },
+  images: {},
   sel: new Set(),
   tool: 'select',
   toolLock: false,
@@ -111,6 +124,7 @@ const TOOLS = [
   { id: 'pen', icon: 'pen', key: 'p', name: 'Path / pen (click = corner, drag = curve)' },
   { id: 'brush', icon: 'brush', key: 'b', name: 'Freehand brush' },
   { id: 'text', icon: 'text', key: 't', name: 'Text' },
+  { id: 'image', icon: 'image', key: 'm', name: 'Insert image…', action: 'image' },
   { gap: 1 },
   { id: 'fill', icon: 'bucket', key: 'f', name: 'Fill bucket (click a shape)' },
   { id: 'picker', icon: 'picker', key: 'i', name: 'Color picker (Alt = stroke)' },
@@ -130,7 +144,7 @@ const HINTS = {
 };
 
 /* ============================== geometry ============================== */
-const BOX = new Set(['rect', 'ellipse', 'diamond', 'triangle', 'hexagon', 'star']);
+const BOX = new Set(['rect', 'ellipse', 'diamond', 'triangle', 'hexagon', 'star', 'image']);
 const PTS = new Set(['line', 'arrow', 'free']);
 const ASC = 0.92;
 const mctx = document.createElement('canvas').getContext('2d');
@@ -153,7 +167,7 @@ function textLayout(s, maxW) {
   return { lines, lw, w: Math.max(4, ...lw), h: lines.length * s.fs * 1.25 };
 }
 const textMetrics = s => textLayout(s, s.w || 0);
-const LABEL_FIT = { rect: 1, ellipse: 0.75, diamond: 0.55, triangle: 0.5, hexagon: 0.8, star: 0.5 };
+const LABEL_FIT = { image: 1, rect: 1, ellipse: 0.75, diamond: 0.55, triangle: 0.5, hexagon: 0.8, star: 0.5 };
 function labelGeom(s) {
   const b = bounds(s), cx = b.x + b.w / 2, cy = b.y + b.h / 2;
   const fit = BOX.has(s.type) ? Math.max(24, b.w * LABEL_FIT[s.type] - 12) : 0;
@@ -178,7 +192,7 @@ function paintText(ctx, m, x, y, bw, al, fs, halo) {
     if (halo) ctx.strokeText(l, x + off, ty); else ctx.fillText(l, x + off, ty);
   });
 }
-const fillable = s => BOX.has(s.type) || ((s.type === 'free' || s.type === 'path') && s.closed);
+const fillable = s => (BOX.has(s.type) && s.type !== 'image') || ((s.type === 'free' || s.type === 'path') && s.closed);
 
 function nodesD(nodes, closed) {
   let d = `M${f(nodes[0].x)} ${f(nodes[0].y)}`;
@@ -193,6 +207,7 @@ function nodesD(nodes, closed) {
 function pathD(s) {
   const { x, y, w, h } = s;
   switch (s.type) {
+    case 'image':
     case 'rect': {
       const r = Math.min(s.r || 0, w / 2, h / 2);
       if (r <= 0.01) return `M${f(x)} ${f(y)}h${f(w)}v${f(h)}h${f(-w)}z`;
@@ -271,15 +286,43 @@ function bounds(s) {
 }
 function strokeBounds(s) {
   const b = bounds(s);
-  if (s.type === 'text') return b;
-  const p = (s.stroke && s.sw ? s.sw * 0.75 : 0) + (s.type === 'arrow' ? Math.max(12, s.sw * 4) * 0.4 : 0);
-  return { x: b.x - p, y: b.y - p, w: b.w + p * 2, h: b.h + p * 2 };
+  if (s.type === 'text') return rotBox(b, s.a || 0);
+  const p = (s.stroke && s.sw && s.type !== 'image' ? s.sw * 0.75 : 0) + (s.type === 'arrow' ? Math.max(12, s.sw * 4) * 0.4 : 0);
+  return rotBox({ x: b.x - p, y: b.y - p, w: b.w + p * 2, h: b.h + p * 2 }, s.a || 0);
 }
 const unionB = list => {
   let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
   for (const b of list) { x1 = Math.min(x1, b.x); y1 = Math.min(y1, b.y); x2 = Math.max(x2, b.x + b.w); y2 = Math.max(y2, b.y + b.h); }
   return list.length ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
 };
+
+const rotAbout = (x, y, cx, cy, a) => {
+  const c = Math.cos(a), si = Math.sin(a), dx = x - cx, dy = y - cy;
+  return { x: cx + dx * c - dy * si, y: cy + dx * si + dy * c };
+};
+const centerOf = b => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+function rotBox(b, a) { // axis-aligned box around b rotated by a about its center
+  if (!a) return b;
+  const c = centerOf(b);
+  const pts = [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]].map(([x, y]) => rotAbout(x, y, c.x, c.y, a));
+  return unionB(pts.map(p => ({ x: p.x, y: p.y, w: 0, h: 0 })));
+}
+const aabb = s => rotBox(bounds(s), s.a || 0);
+function toLocal(s, p) { // world point -> the shape's unrotated frame
+  if (!s.a) return p;
+  const c = centerOf(bounds(s));
+  return rotAbout(p.x, p.y, c.x, c.y, -s.a);
+}
+function bakePath(s) { // fold a path's rotation into its nodes so they can be edited
+  if (!s.a) return;
+  const c = centerOf(bounds(s)), co = Math.cos(s.a), si = Math.sin(s.a);
+  for (const n of s.nodes) {
+    const p = rotAbout(n.x, n.y, c.x, c.y, s.a);
+    const ox = (n.ox || 0) * co - (n.oy || 0) * si, oy = (n.ox || 0) * si + (n.oy || 0) * co;
+    n.x = p.x; n.y = p.y; n.ox = ox; n.oy = oy;
+  }
+  s.a = 0;
+}
 
 function moveShape(s, dx, dy) {
   if (BOX.has(s.type) || s.type === 'text') { s.x += dx; s.y += dy; }
@@ -304,6 +347,7 @@ const joinOf = s => (PTS.has(s.type) || s.type === 'path') ? 'round' : (s.join |
 function drawShape(ctx, s, alpha = 1) {
   ctx.save();
   ctx.globalAlpha = alpha * (s.op ?? 100) / 100;
+  if (s.a) { const c = centerOf(bounds(s)); ctx.translate(c.x, c.y); ctx.rotate(s.a); ctx.translate(-c.x, -c.y); }
   if (s.type === 'text') {
     const m = textMetrics(s);
     ctx.font = fontStr(s);
@@ -313,8 +357,13 @@ function drawShape(ctx, s, alpha = 1) {
     return;
   }
   const p = new Path2D(pathD(s));
+  if (s.type === 'image') {
+    const im = getImg(s.imgId);
+    if (im) { ctx.imageSmoothingEnabled = !s.px; ctx.drawImage(im, s.x, s.y, s.w, s.h); }
+    else { ctx.fillStyle = '#eceef2'; ctx.fill(p); }
+  }
   if (s.fill && fillable(s)) { ctx.fillStyle = s.fill; ctx.fill(p); }
-  if (s.stroke && s.sw > 0) {
+  if (s.stroke && s.sw > 0 && s.type !== 'image') {
     ctx.strokeStyle = s.stroke;
     ctx.lineWidth = s.sw;
     ctx.lineCap = capOf(s);
@@ -338,7 +387,7 @@ function drawShape(ctx, s, alpha = 1) {
 const drawShapes = (ctx, shapes, alpha = 1, skip) => { for (const s of shapes) if (s.id !== skip) drawShape(ctx, s, alpha); };
 
 /* ============================== document helpers ============================== */
-const LABELS = { rect: 'Rectangle', ellipse: 'Oval', diamond: 'Diamond', triangle: 'Triangle', hexagon: 'Hexagon', star: 'Star', line: 'Line', arrow: 'Arrow', free: 'Brush', path: 'Path', text: 'Text' };
+const LABELS = { image: 'Image', rect: 'Rectangle', ellipse: 'Oval', diamond: 'Diamond', triangle: 'Triangle', hexagon: 'Hexagon', star: 'Star', line: 'Line', arrow: 'Arrow', free: 'Brush', path: 'Path', text: 'Text' };
 function layerLabel(s, tool) {
   let base = (tool && tool.label) || LABELS[s.type] || 'Shape';
   if (s.type === 'text') base = 'Text';
@@ -378,9 +427,10 @@ const selShapes = () => selList().map(o => o.s);
 
 const hitCtx = document.createElement('canvas').getContext('2d');
 function hitShape(s, x, y, tol) {
+  if (s.a) { const q = toLocal(s, { x, y }); x = q.x; y = q.y; }
   if (s.type === 'text') { const b = bounds(s); return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
   const p = new Path2D(pathD(s));
-  if (s.fill && fillable(s) && hitCtx.isPointInPath(p, x, y)) return true;
+  if ((s.type === 'image' || (s.fill && fillable(s))) && hitCtx.isPointInPath(p, x, y)) return true;
   hitCtx.lineWidth = Math.max(s.sw || 0, tol * 2);
   return hitCtx.isPointInStroke(p, x, y);
 }
@@ -401,9 +451,12 @@ let saveTimer = 0;
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    const base = { doc: S.doc, style: S.style, exp: S.exp, grid: S.grid, cam: S.cam };
     try {
-      localStorage.setItem('sketchdraw:v1', JSON.stringify({ doc: S.doc, style: S.style, exp: S.exp, grid: S.grid, cam: S.cam }));
-    } catch (e) { /* storage unavailable */ }
+      localStorage.setItem('sketchdraw:v1', JSON.stringify({ ...base, images: usedImages() }));
+    } catch (e) {
+      try { localStorage.setItem('sketchdraw:v1', JSON.stringify(base)); } catch (e2) { /* storage unavailable */ }
+    }
   }, 400);
 }
 function commit() {
@@ -480,6 +533,15 @@ function handlesFor(bb) {
 }
 const HANDLE_CURSOR = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' };
 
+// frame of the current selection: one shape keeps its own rotation, several share an axis-aligned box
+function selFrame() {
+  const sel = selShapes(); if (!sel.length) return null;
+  if (sel.length === 1) { const b = bounds(sel[0]), c = centerOf(b); return { ob: b, a: sel[0].a || 0, cx: c.x, cy: c.y, single: sel[0] }; }
+  const ob = unionB(sel.map(aabb)), c = centerOf(ob);
+  return { ob, a: 0, cx: c.x, cy: c.y, single: null };
+}
+const rotHandlePos = fr => rotAbout(fr.cx, fr.ob.y - 6 / S.cam.z - 26 / S.cam.z, fr.cx, fr.cy, fr.a);
+
 function render() {
   const D = dpr(), z = S.cam.z;
   ctx.setTransform(D, 0, 0, D, 0, 0);
@@ -500,23 +562,34 @@ function render() {
   const sel = selShapes();
   if (sel.length && !S.draft) {
     ctx.save();
-    ctx.strokeStyle = '#4c6ef5'; ctx.lineWidth = lw; ctx.setLineDash([4 / z, 3 / z]);
+    ctx.strokeStyle = '#4c6ef5'; ctx.lineWidth = lw;
     const pad = 3 / z;
-    for (const s of sel) { const b = bounds(s); ctx.strokeRect(b.x - pad, b.y - pad, b.w + pad * 2, b.h + pad * 2); }
-    ctx.setLineDash([]);
-    const ub = unionB(sel.map(bounds));
-    for (const h of handlesFor(ub)) {
-      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.rect(h.x - 4 / z, h.y - 4 / z, 8 / z, 8 / z); ctx.fill(); ctx.stroke();
-    }
-    if (sel.length === 1 && sel[0].type === 'path') {
-      for (const n of sel[0].nodes) {
-        if (n.ox || n.oy) {
-          ctx.beginPath(); ctx.moveTo(n.x - n.ox, n.y - n.oy); ctx.lineTo(n.x + n.ox, n.y + n.oy); ctx.stroke();
-          for (const k of [-1, 1]) { ctx.beginPath(); ctx.arc(n.x + k * n.ox, n.y + k * n.oy, 4 / z, 0, 7); ctx.fillStyle = '#4c6ef5'; ctx.fill(); }
+    for (const s of sel) {
+      const b = bounds(s), c = centerOf(b);
+      ctx.save();
+      if (s.a) { ctx.translate(c.x, c.y); ctx.rotate(s.a); ctx.translate(-c.x, -c.y); }
+      ctx.setLineDash([4 / z, 3 / z]);
+      ctx.strokeRect(b.x - pad, b.y - pad, b.w + pad * 2, b.h + pad * 2);
+      ctx.setLineDash([]);
+      if (sel.length === 1 && s.type === 'path') {
+        for (const n of s.nodes) {
+          if (n.ox || n.oy) {
+            ctx.beginPath(); ctx.moveTo(n.x - n.ox, n.y - n.oy); ctx.lineTo(n.x + n.ox, n.y + n.oy); ctx.stroke();
+            for (const k of [-1, 1]) { ctx.beginPath(); ctx.arc(n.x + k * n.ox, n.y + k * n.oy, 4 / z, 0, 7); ctx.fillStyle = '#4c6ef5'; ctx.fill(); }
+          }
+          ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(n.x, n.y, 5 / z, 0, 7); ctx.fill(); ctx.stroke();
         }
-        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(n.x, n.y, 5 / z, 0, 7); ctx.fill(); ctx.stroke();
       }
+      ctx.restore();
     }
+    const fr = selFrame();
+    for (const h of handlesFor(fr.ob)) {
+      const p = rotAbout(h.x, h.y, fr.cx, fr.cy, fr.a);
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.rect(p.x - 4 / z, p.y - 4 / z, 8 / z, 8 / z); ctx.fill(); ctx.stroke();
+    }
+    const top = rotAbout(fr.cx, fr.ob.y - 6 / z, fr.cx, fr.cy, fr.a), rh = rotHandlePos(fr);
+    ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(rh.x, rh.y); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(rh.x, rh.y, 5 / z, 0, 7); ctx.fill(); ctx.stroke();
     ctx.restore();
   }
   // pen draft
@@ -699,7 +772,7 @@ for (const t of TOOLS) {
   if (t.gap) { toolbar.insertAdjacentHTML('beforeend', '<div class="gap"></div>'); continue; }
   const b = document.createElement('button');
   b.className = 'ib'; b.dataset.tool = t.id; b.title = `${t.name} (${t.key.toUpperCase()})`; b.innerHTML = icon(t.icon);
-  b.onclick = () => setTool(t.id);
+  b.onclick = () => (t.action ? runAction(t.action) : setTool(t.id));
   toolbar.appendChild(b);
 }
 toolbar.insertAdjacentHTML('beforeend', '<div class="gap"></div>');
@@ -747,10 +820,10 @@ function updateTopbar() {
 }
 function newDoc() {
   const l = newLayer('Layer 1');
-  S.doc = { layers: [l], active: l.id }; S.sel.clear(); commit();
+  S.doc = { layers: [l], active: l.id }; S.images = {}; imgCache.clear(); S.sel.clear(); commit();
 }
 function saveProject() {
-  download(new Blob([JSON.stringify({ app: 'sketchdraw', v: 1, doc: S.doc })], { type: 'application/json' }), 'sketch.sketchdraw.json');
+  download(new Blob([JSON.stringify({ app: 'sketchdraw', v: 1, doc: S.doc, images: usedImages() })], { type: 'application/json' }), 'sketch.sketchdraw.json');
   toast('Project saved');
 }
 $('#openfile').addEventListener('change', async e => {
@@ -760,6 +833,7 @@ $('#openfile').addEventListener('change', async e => {
     const j = JSON.parse(await file.text());
     const doc = j.doc || j;
     if (!Array.isArray(doc.layers) || !doc.layers.length) throw new Error('bad');
+    S.images = j.images || {}; imgCache.clear();
     S.doc = doc; if (!layerById(doc.active)) doc.active = doc.layers[doc.layers.length - 1].id;
     S.sel.clear(); commit(); fitContent(); toast('Project opened');
   } catch (err) { toast('Could not open that file'); }
@@ -816,6 +890,9 @@ props.innerHTML = `
   <div class="p-sec" id="sec-rad"><label>Corner radius <b id="v-rad"></b></label><input type="range" id="r-rad" min="0" max="200" step="1"></div>
   <div class="p-sec" id="sec-join"><label>Outline corners</label>
     <div class="seg" id="seg-join"><button data-v="miter">Sharp</button><button data-v="round">Round</button></div></div>
+  <div class="p-sec" id="sec-angle"><label>Rotation <b id="v-an"></b></label><input type="range" id="r-an" min="-180" max="180" step="1"></div>
+  <div class="p-sec" id="sec-img"><label>Image scaling</label>
+    <div class="seg" id="seg-px"><button data-v="smooth">Smooth</button><button data-v="crisp">Crisp pixels</button></div></div>
   <div class="p-sec"><label>Opacity <b id="v-op"></b></label><input type="range" id="r-op" min="5" max="100" step="5"></div>
   <div id="sec-text">
     <div class="p-sec"><label>Font family</label><div class="seg" id="seg-font">
@@ -872,6 +949,8 @@ function bindRange(id, vid, fmt, apply) {
 bindRange('#r-sw', '#v-sw', v => v + 'px', v => { S.style.sw = v; applyToSel(s => { s.sw = v; }); });
 bindRange('#r-rad', '#v-rad', v => v + 'px', v => { S.style.rr = v; applyToSel(s => { if (s.type === 'rect') s.r = v; }); });
 bindRange('#r-op', '#v-op', v => v + '%', v => { S.style.op = v; applyToSel(s => { s.op = v; }); });
+bindRange('#r-an', '#v-an', v => v + '°', v => { applyToSel(s => { if (v) s.a = v * Math.PI / 180; else delete s.a; }); });
+$('#seg-px').onclick = e => { const b = e.target.closest('button'); if (!b) return; applyToSel(s => { if (s.type === 'image') s.px = b.dataset.v === 'crisp'; }); commit(); };
 const isTxt = s => s.type === 'text' || !!s.t;
 bindRange('#r-fs', '#v-fs', v => v + 'px', v => { S.style.fs = v; applyToSel(s => { if (isTxt(s)) s.fs = v; }); });
 $('#seg-fs').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.style.fs = +b.dataset.v; applyToSel(s => { if (isTxt(s)) s.fs = +b.dataset.v; }); commit(); };
@@ -914,6 +993,12 @@ function refreshProps() {
   set('#r-op', '#v-op', val('op'), v => v + '%');
   const rect = selShapes().find(s => s.type === 'rect');
   set('#r-rad', '#v-rad', rect ? rect.r || 0 : st.rr, v => v + 'px');
+  const sh = selShapes();
+  $('#sec-angle').style.display = sh.length ? '' : 'none';
+  set('#r-an', '#v-an', sh.length ? Math.round((sh[0].a || 0) * 180 / Math.PI) : 0, v => v + '°');
+  const img = sh.find(x => x.type === 'image');
+  $('#sec-img').style.display = img ? '' : 'none';
+  $('#seg-px').querySelectorAll('button').forEach(b => b.classList.toggle('on', (b.dataset.v === 'crisp') === !!(img && img.px)));
   const tx = selShapes().find(isTxt) || st;
   set('#r-fs', '#v-fs', tx.fs, v => v + 'px');
   $('#seg-fs').querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.v === tx.fs));
@@ -1082,7 +1167,7 @@ function openText(shape, wp, box) {
   ta.hidden = false;
   ta.value = ed.value;
   Object.assign(ta.style, { left: p.x + 'px', top: p.y + 'px', fontSize: ed.fs * z + 'px', fontFamily: FONTS[ed.font] || FONTS.sans, color: ed.color,
-    lineHeight: '1.25', textAlign: ed.al, whiteSpace: ed.fixedW ? 'pre-wrap' : 'pre', overflowWrap: 'break-word' });
+    lineHeight: '1.25', textAlign: ed.al, transform: ed.shape && ed.shape.a ? `rotate(${ed.shape.a}rad)` : '', whiteSpace: ed.fixedW ? 'pre-wrap' : 'pre', overflowWrap: 'break-word' });
   sizeText();
   redraw(false);
   ta.focus(); ta.select();
@@ -1133,6 +1218,58 @@ function finishPen(closed) {
   S.sel = new Set([s.id]); commit(); afterCreate();
 }
 
+/* ============================== images ============================== */
+const readFile = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+const loadImage = src => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; });
+async function addImageFiles(files, at) {
+  const list = [...files].filter(f => f.type.startsWith('image/'));
+  if (!list.length) return false;
+  const out = [];
+  let n = 0;
+  for (const f of list) {
+    try {
+      let src = await readFile(f);
+      const im = await loadImage(src);
+      let w = im.naturalWidth, h = im.naturalHeight;
+      const big = Math.max(w, h);
+      if (big > 2048) { // keep projects small
+        const k = 2048 / big, c = document.createElement('canvas');
+        c.width = Math.round(w * k); c.height = Math.round(h * k);
+        c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+        src = c.toDataURL('image/png'); w = c.width; h = c.height;
+      }
+      const id = uid();
+      S.images[id] = src;
+      const k = Math.min(1, (view.w / S.cam.z) * 0.6 / w, (view.h / S.cam.z) * 0.6 / h);
+      const dw = Math.max(1, Math.round(w * k)), dh = Math.max(1, Math.round(h * k));
+      const c0 = at || toWorld(view.w / 2, view.h / 2);
+      const s = { id: uid(), type: 'image', imgId: id, x: Math.round(snap(c0.x - dw / 2) + n * 24), y: Math.round(snap(c0.y - dh / 2) + n * 24), w: dw, h: dh,
+        fill: null, stroke: null, sw: 0, op: 100, dash: 'solid', px: false };
+      const l = addShape(s); l.name = 'Image: ' + f.name.replace(/\.[^.]+$/, '').slice(0, 18);
+      out.push(s.id); n++;
+    } catch (err) { toast('Could not read ' + f.name); }
+  }
+  if (!out.length) return false;
+  S.sel = new Set(out); commit(); setTool('select');
+  return true;
+}
+function runAction(a) {
+  if (a === 'image') $('#imgfile').click();
+}
+$('#imgfile').addEventListener('change', e => { addImageFiles(e.target.files); e.target.value = ''; });
+stage.addEventListener('dragover', e => { if ([...(e.dataTransfer.items || [])].some(i => i.kind === 'file')) e.preventDefault(); });
+stage.addEventListener('drop', e => {
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const r = board.getBoundingClientRect();
+  addImageFiles(e.dataTransfer.files, toWorld(e.clientX - r.left, e.clientY - r.top));
+});
+const usedImages = () => {
+  const out = {};
+  for (const l of S.doc.layers) for (const s of l.shapes) if (s.imgId && S.images[s.imgId]) out[s.imgId] = S.images[s.imgId];
+  return out;
+};
+
 /* ============================== pointer interaction ============================== */
 function mkShape(tool, x, y) {
   const st = S.style;
@@ -1143,23 +1280,27 @@ function mkShape(tool, x, y) {
   return null;
 }
 function hitHandle(wp) {
-  const sel = selShapes(); if (!sel.length) return null;
+  const fr = selFrame(); if (!fr) return null;
   const tol = 9 / S.cam.z;
-  for (const h of handlesFor(unionB(sel.map(bounds)))) if (Math.abs(h.x - wp.x) <= tol && Math.abs(h.y - wp.y) <= tol) return h.n;
+  const rh = rotHandlePos(fr);
+  if (Math.hypot(rh.x - wp.x, rh.y - wp.y) <= tol) return 'rot';
+  for (const h of handlesFor(fr.ob)) {
+    const p = rotAbout(h.x, h.y, fr.cx, fr.cy, fr.a);
+    if (Math.abs(p.x - wp.x) <= tol && Math.abs(p.y - wp.y) <= tol) return h.n;
+  }
   return null;
 }
 function hitNode(wp) {
   const sel = selShapes();
   if (sel.length !== 1 || sel[0].type !== 'path') return null;
-  const tol = 8 / S.cam.z;
-  const ns = sel[0].nodes;
+  const tol = 8 / S.cam.z, ns = sel[0].nodes, q = toLocal(sel[0], wp);
   for (let i = 0; i < ns.length; i++) {
     const n = ns[i];
     if (n.ox || n.oy) {
-      if (Math.hypot(n.x + n.ox - wp.x, n.y + n.oy - wp.y) <= tol) return { s: sel[0], i, part: 'out' };
-      if (Math.hypot(n.x - n.ox - wp.x, n.y - n.oy - wp.y) <= tol) return { s: sel[0], i, part: 'in' };
+      if (Math.hypot(n.x + n.ox - q.x, n.y + n.oy - q.y) <= tol) return { s: sel[0], i, part: 'out' };
+      if (Math.hypot(n.x - n.ox - q.x, n.y - n.oy - q.y) <= tol) return { s: sel[0], i, part: 'in' };
     }
-    if (Math.hypot(n.x - wp.x, n.y - wp.y) <= tol) return { s: sel[0], i, part: 'a' };
+    if (Math.hypot(n.x - q.x, n.y - q.y) <= tol) return { s: sel[0], i, part: 'a' };
   }
   return null;
 }
@@ -1178,11 +1319,12 @@ board.addEventListener('pointerdown', e => {
 
   if (S.tool === 'select') {
     const nh = hitNode(wp);
-    if (nh) { S.drag = { k: 'node', ...nh }; return; }
+    if (nh) { bakePath(nh.s); S.drag = { k: 'node', ...nh }; return; }
     const hn = hitHandle(wp);
     if (hn) {
-      const sel = selShapes();
-      S.drag = { k: 'resize', h: hn, ob: unionB(sel.map(bounds)), orig: new Map(sel.map(s => [s.id, clone(s)])) };
+      const sel = selShapes(), fr = selFrame(), orig = new Map(sel.map(s => [s.id, clone(s)]));
+      if (hn === 'rot') S.drag = { k: 'rotate', pivot: { x: fr.cx, y: fr.cy }, a0: Math.atan2(wp.y - fr.cy, wp.x - fr.cx), base: fr.a, orig };
+      else S.drag = { k: 'resize', h: hn, fr, ob: fr.ob, orig };
       return;
     }
     const hit = pickAt(wp.x, wp.y);
@@ -1191,7 +1333,7 @@ board.addEventListener('pointerdown', e => {
       else if (!S.sel.has(hit.s.id)) S.sel = new Set([hit.s.id]);
       S.doc.active = hit.l.id;
       const sel = selShapes();
-      S.drag = { k: 'move', start: wp, ob: unionB(sel.map(bounds)), orig: new Map(sel.map(s => [s.id, clone(s)])), moved: false };
+      S.drag = { k: 'move', start: wp, ob: unionB(sel.map(aabb)), orig: new Map(sel.map(s => [s.id, clone(s)])), moved: false };
       refreshLayers(); refreshProps(); redraw(false);
     } else {
       if (!e.shiftKey) S.sel.clear();
@@ -1206,6 +1348,7 @@ board.addEventListener('pointerdown', e => {
     const hit = pickAt(wp.x, wp.y, true);
     if (!hit) return;
     const s = hit.s;
+    if (s.type === 'image') return toast('Images have no fill color');
     if (S.tool === 'picker') {
       const isLine = s.type === 'line' || s.type === 'arrow';
       const c = e.altKey ? s.stroke : (isLine ? s.stroke : (s.fill || s.stroke));
@@ -1269,7 +1412,7 @@ board.addEventListener('pointermove', e => {
   if (!d) {
     if (S.tool === 'select') {
       const hn = hitHandle(wp);
-      board.style.cursor = hn ? HANDLE_CURSOR[hn] : hitNode(wp) ? 'pointer' : pickAt(wp.x, wp.y) ? 'move' : 'default';
+      board.style.cursor = hn ? (HANDLE_CURSOR[hn] || 'grab') : hitNode(wp) ? 'pointer' : pickAt(wp.x, wp.y) ? 'move' : 'default';
     }
     return;
   }
@@ -1314,7 +1457,8 @@ board.addEventListener('pointermove', e => {
     case 'resize': {
       const ob = d.ob, h = d.h;
       let x1 = ob.x, y1 = ob.y, x2 = ob.x + ob.w, y2 = ob.y + ob.h;
-      const px = snap(wp.x), py = snap(wp.y);
+      const lp = d.fr.a ? rotAbout(wp.x, wp.y, d.fr.cx, d.fr.cy, -d.fr.a) : wp;
+      const px = snap(lp.x), py = snap(lp.y);
       if (h.includes('w')) x1 = px; if (h.includes('e')) x2 = px;
       if (h.includes('n')) y1 = py; if (h.includes('s')) y2 = py;
       let nb = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.max(1, Math.abs(x2 - x1)), h: Math.max(1, Math.abs(y2 - y1)) };
@@ -1322,12 +1466,34 @@ board.addEventListener('pointermove', e => {
       if (origs.every(o => o.type === 'text') && ob.w && ob.h) { // text scales uniformly with its box
         const k = h.length === 2 ? Math.max(nb.w / ob.w, nb.h / ob.h) : (h === 'e' || h === 'w') ? nb.w / ob.w : nb.h / ob.h;
         nb = { w: ob.w * k, h: ob.h * k, x: h.includes('w') ? ob.x + ob.w - ob.w * k : ob.x, y: h.includes('n') ? ob.y + ob.h - ob.h * k : ob.y };
-      } else if ((e.shiftKey || texty) && h.length === 2 && ob.w && ob.h) { // corner: keep aspect
+      } else if ((e.shiftKey || texty || origs.every(o => o.type === 'image')) && h.length === 2 && ob.w && ob.h) { // corner: keep aspect
         const k = Math.max(nb.w / ob.w, nb.h / ob.h);
         nb.w = ob.w * k; nb.h = ob.h * k;
         nb.x = h.includes('w') ? ob.x + ob.w - nb.w : ob.x; nb.y = h.includes('n') ? ob.y + ob.h - nb.h : ob.y;
       }
-      for (const id of S.sel) { const o = findShape(id); if (o && d.orig.has(id)) { Object.assign(o.s, clone(d.orig.get(id))); mapShape(o.s, ob, nb); } }
+      for (const id of S.sel) {
+        const o = findShape(id);
+        if (o && d.orig.has(id)) {
+          Object.assign(o.s, clone(d.orig.get(id))); mapShape(o.s, ob, nb);
+          if (d.fr.a) { // keep the opposite edge fixed on screen
+            const c0 = { x: d.fr.cx, y: d.fr.cy }, c1 = centerOf(nb), r = rotAbout(c1.x, c1.y, c0.x, c0.y, d.fr.a);
+            moveShape(o.s, r.x - c1.x, r.y - c1.y);
+          }
+        }
+      }
+      redraw(); break;
+    }
+    case 'rotate': {
+      let da = Math.atan2(wp.y - d.pivot.y, wp.x - d.pivot.x) - d.a0;
+      if (e.shiftKey) { const st = Math.PI / 12; da = Math.round((d.base + da) / st) * st - d.base; }
+      for (const id of S.sel) {
+        const o = findShape(id), orig = d.orig.get(id);
+        if (!o || !orig) continue;
+        Object.assign(o.s, clone(orig));
+        const c = centerOf(bounds(orig)), c2 = rotAbout(c.x, c.y, d.pivot.x, d.pivot.y, da);
+        moveShape(o.s, c2.x - c.x, c2.y - c.y);
+        o.s.a = (orig.a || 0) + da;
+      }
       redraw(); break;
     }
     case 'node': {
@@ -1344,7 +1510,7 @@ board.addEventListener('pointermove', e => {
       const r = { x: Math.min(d.a.x, d.b.x), y: Math.min(d.a.y, d.b.y), w: Math.abs(d.a.x - d.b.x), h: Math.abs(d.a.y - d.b.y) };
       const ids = new Set(d.base);
       for (const l of S.doc.layers) if (l.visible && !l.locked) for (const s of l.shapes) {
-        const b = bounds(s);
+        const b = aabb(s);
         if (b.x < r.x + r.w && b.x + b.w > r.x && b.y < r.y + r.h && b.y + b.h > r.y) ids.add(s.id);
       }
       S.sel = ids; redraw(false); break;
@@ -1379,6 +1545,7 @@ function endDrag() {
     }
     case 'move': if (d.moved) commit(); else { refreshProps(); } break;
     case 'resize': case 'node': commit(); break;
+    case 'rotate': for (const x of selShapes()) { x.a = Math.atan2(Math.sin(x.a || 0), Math.cos(x.a || 0)); if (!x.a) delete x.a; } commit(); break;
     case 'marquee': refreshProps(); redraw(false); break;
     case 'textbox': {
       const a = { x: snap(d.a.x), y: snap(d.a.y) }, b = { x: snap(d.b.x), y: snap(d.b.y) };
@@ -1397,6 +1564,7 @@ board.addEventListener('dblclick', e => {
   const { sx, sy } = evPos(e), wp = toWorld(sx, sy);
   const nh = hitNode(wp);
   if (nh && nh.part === 'a') { // toggle corner <-> smooth
+    bakePath(nh.s);
     const ns = nh.s.nodes, n = ns[nh.i];
     if (n.ox || n.oy) { n.ox = 0; n.oy = 0; }
     else {
@@ -1456,7 +1624,7 @@ window.addEventListener('keydown', e => {
   if (e.key === '-') { setZoom(S.cam.z / 1.25); return; }
   if (k === 'q') { lockBtn.click(); return; }
   const t = TOOLS.find(t => t.key === k);
-  if (t) setTool(t.id);
+  if (t) (t.action ? runAction(t.action) : setTool(t.id));
   else if (k === 'n') { S.grid.on = !S.grid.on; syncGrid(); redraw(false); persist(); }
 });
 window.addEventListener('keyup', e => {
@@ -1464,17 +1632,15 @@ window.addEventListener('keyup', e => {
 });
 window.addEventListener('paste', e => {
   if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
-  const it = [...(e.clipboardData ? e.clipboardData.items : [])].find(i => i.type.startsWith('image/'));
-  if (!it) return;
-  const url = URL.createObjectURL(it.getAsFile());
-  toast('Pasting images is not supported yet — drawings only'); URL.revokeObjectURL(url);
+  const files = [...(e.clipboardData ? e.clipboardData.items : [])].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
+  if (files.length) { e.preventDefault(); addImageFiles(files.map((f, i) => f.name ? f : new File([f], 'pasted-' + (i + 1) + '.png', { type: f.type }))); }
 });
 
 /* ============================== boot ============================== */
 try {
   const saved = JSON.parse(localStorage.getItem('sketchdraw:v1'));
   if (saved && saved.doc && Array.isArray(saved.doc.layers) && saved.doc.layers.length) {
-    S.doc = saved.doc;
+    S.doc = saved.doc; S.images = saved.images || {};
     if (!layerById(S.doc.active)) S.doc.active = S.doc.layers[S.doc.layers.length - 1].id;
     Object.assign(S.style, saved.style || {}); Object.assign(S.exp, saved.exp || {}); Object.assign(S.grid, saved.grid || {});
     if (saved.cam) Object.assign(S.cam, saved.cam);
