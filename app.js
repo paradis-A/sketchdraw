@@ -52,6 +52,9 @@ const ICONS = {
   toback: '<path d="M5 20h14M12 4v11M6 10l6 6 6-6"/>',
   bg: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 12h8V4M12 20v-8h8"/>',
   selonly: '<path d="M4 8V5a1 1 0 011-1h3M16 4h3a1 1 0 011 1v3M20 16v3a1 1 0 01-1 1h-3M8 20H5a1 1 0 01-1-1v-3"/><rect x="9" y="9" width="6" height="6"/>',
+  alignl: '<path d="M4 6h16M4 12h10M4 18h14"/>',
+  alignc: '<path d="M4 6h16M7 12h10M5 18h14"/>',
+  alignr: '<path d="M4 6h16M10 12h10M6 18h14"/>',
   tolayer: '<path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/>',
 };
 const icon = (n, size = 20) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n]}</svg>`;
@@ -74,7 +77,7 @@ const S = {
   tool: 'select',
   toolLock: false,
   cam: { x: 0, y: 0, z: 1 },
-  style: { fill: '#4263eb', stroke: '#4263eb', link: true, target: 'fill', sw: 2, dash: 'solid', op: 100, rr: 16, join: 'miter', fs: 28, font: 'sans' },
+  style: { fill: '#4263eb', stroke: '#4263eb', link: true, target: 'fill', sw: 2, dash: 'solid', op: 100, rr: 16, join: 'miter', fs: 28, font: 'sans', align: 'left' },
   grid: { on: false, size: 16 },
   exp: { bg: true, scale: 2, pad: 16, selOnly: false },
   drag: null,
@@ -133,11 +136,47 @@ const ASC = 0.92;
 const mctx = document.createElement('canvas').getContext('2d');
 
 const fontStr = s => `${s.fs}px ${FONTS[s.font] || FONTS.sans}`;
-function textMetrics(s) {
-  const lines = String(s.text).split('\n');
+// lays out a text shape (s.text, optional box width s.w) or a shape label (s.t) with wrapping at maxW (0 = none)
+function textLayout(s, maxW) {
   mctx.font = fontStr(s);
-  const w = Math.max(4, ...lines.map(l => mctx.measureText(l).width));
-  return { lines, w, h: lines.length * s.fs * 1.25 };
+  const lines = [];
+  for (const para of String(s.type === 'text' ? s.text : s.t).split('\n')) {
+    if (!maxW) { lines.push(para); continue; }
+    let cur = '';
+    for (const word of para.split(' ')) {
+      const test = cur ? cur + ' ' + word : word;
+      if (cur && mctx.measureText(test).width > maxW) { lines.push(cur); cur = word; } else cur = test;
+    }
+    lines.push(cur);
+  }
+  const lw = lines.map(l => mctx.measureText(l).width);
+  return { lines, lw, w: Math.max(4, ...lw), h: lines.length * s.fs * 1.25 };
+}
+const textMetrics = s => textLayout(s, s.w || 0);
+const LABEL_FIT = { rect: 1, ellipse: 0.75, diamond: 0.55, triangle: 0.5, hexagon: 0.8, star: 0.5 };
+function labelGeom(s) {
+  const b = bounds(s), cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  const fit = BOX.has(s.type) ? Math.max(24, b.w * LABEL_FIT[s.type] - 12) : 0;
+  const m = textLayout(s, fit);
+  const bw = fit || m.w;
+  return { m, bw, x: cx - bw / 2, y: cy - m.h / 2, cx, cy, fit };
+}
+function labelColor(s) {
+  if (s.tc) return s.tc;
+  if (fillable(s) && s.fill && /^#[0-9a-f]{6}$/i.test(s.fill)) {
+    const n = parseInt(s.fill.slice(1), 16);
+    return ((n >> 16) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114) / 255 > 0.6 ? '#1e1e1e' : '#ffffff';
+  }
+  return s.stroke || '#1e1e1e';
+}
+let hideLabelId = null;
+function paintText(ctx, m, x, y, bw, al, fs, halo) {
+  ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+  m.lines.forEach((l, i) => {
+    const off = al === 'center' ? (bw - m.lw[i]) / 2 : al === 'right' ? bw - m.lw[i] : 0;
+    const ty = y + i * fs * 1.25 + fs * ASC + fs * 0.1;
+    if (halo) ctx.strokeText(l, x + off, ty); else ctx.fillText(l, x + off, ty);
+  });
 }
 const fillable = s => BOX.has(s.type) || ((s.type === 'free' || s.type === 'path') && s.closed);
 
@@ -208,7 +247,7 @@ function pathD(s) {
 }
 
 function bounds(s) {
-  if (s.type === 'text') { const m = textMetrics(s); return { x: s.x, y: s.y, w: m.w, h: m.h }; }
+  if (s.type === 'text') { if (s.w) return { x: s.x, y: s.y, w: s.w, h: s.h }; const m = textMetrics(s); return { x: s.x, y: s.y, w: m.w, h: m.h }; }
   if (BOX.has(s.type)) return { x: s.x, y: s.y, w: s.w, h: s.h };
   let pts = s.pts;
   if (s.type === 'path') {
@@ -250,7 +289,7 @@ function moveShape(s, dx, dy) {
 function mapShape(s, ob, nb) {
   const sx = ob.w ? nb.w / ob.w : 1, sy = ob.h ? nb.h / ob.h : 1;
   const mx = v => nb.x + (v - ob.x) * sx, my = v => nb.y + (v - ob.y) * sy;
-  if (s.type === 'text') { s.x = mx(s.x); s.y = my(s.y); s.fs = clamp(s.fs * sy, 4, 600); }
+  if (s.type === 'text') { s.x = mx(s.x); s.y = my(s.y); s.fs = clamp(s.fs * sy, 4, 600); if (s.w) { s.w *= sx; s.h *= sy; } }
   else if (BOX.has(s.type)) { s.x = mx(s.x); s.y = my(s.y); s.w *= sx; s.h *= sy; if (s.r) s.r *= Math.min(sx, sy); }
   else if (s.pts) s.pts.forEach(p => { p.x = mx(p.x); p.y = my(p.y); });
   else if (s.nodes) s.nodes.forEach(p => { p.x = mx(p.x); p.y = my(p.y); p.ox = (p.ox || 0) * sx; p.oy = (p.oy || 0) * sy; });
@@ -269,8 +308,7 @@ function drawShape(ctx, s, alpha = 1) {
     const m = textMetrics(s);
     ctx.font = fontStr(s);
     ctx.fillStyle = s.fill || s.stroke || '#1e1e1e';
-    ctx.textBaseline = 'alphabetic';
-    m.lines.forEach((l, i) => ctx.fillText(l, s.x, s.y + i * s.fs * 1.25 + s.fs * ASC + s.fs * 0.1));
+    paintText(ctx, m, s.x, s.y, s.w || m.w, s.al || 'left', s.fs);
     ctx.restore();
     return;
   }
@@ -284,6 +322,16 @@ function drawShape(ctx, s, alpha = 1) {
     ctx.miterLimit = 10;
     ctx.setLineDash(dashArr(s));
     ctx.stroke(p);
+  }
+  if (s.t && s.id !== hideLabelId) {
+    const g = labelGeom(s);
+    ctx.setLineDash([]); ctx.font = fontStr(s); ctx.fillStyle = labelColor(s);
+    if (!fillable(s)) { // keep text readable on top of a line
+      ctx.save(); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = s.fs * 0.3; ctx.lineJoin = 'round';
+      paintText(ctx, g.m, g.x, g.y, g.bw, s.al || 'center', s.fs, true);
+      ctx.restore();
+    }
+    paintText(ctx, g.m, g.x, g.y, g.bw, s.al || 'center', s.fs);
   }
   ctx.restore();
 }
@@ -485,7 +533,7 @@ function render() {
     ctx.restore();
   }
   // marquee
-  if (S.drag && S.drag.k === 'marquee') {
+  if (S.drag && (S.drag.k === 'marquee' || S.drag.k === 'textbox')) {
     const m = S.drag;
     ctx.save();
     ctx.fillStyle = 'rgba(76,110,245,.08)'; ctx.strokeStyle = '#4c6ef5'; ctx.lineWidth = lw;
@@ -770,8 +818,15 @@ props.innerHTML = `
     <div class="seg" id="seg-join"><button data-v="miter">Sharp</button><button data-v="round">Round</button></div></div>
   <div class="p-sec"><label>Opacity <b id="v-op"></b></label><input type="range" id="r-op" min="5" max="100" step="5"></div>
   <div id="sec-text">
-    <div class="p-sec"><label>Font size <b id="v-fs"></b></label><input type="range" id="r-fs" min="8" max="200" step="1"></div>
-    <div class="p-sec"><label>Font</label><select id="s-font"><option value="sans">Sans</option><option value="serif">Serif</option><option value="mono">Mono</option><option value="hand">Handwritten</option></select></div>
+    <div class="p-sec"><label>Font family</label><div class="seg" id="seg-font">
+      <button data-v="hand" style="font-family:'Segoe Print','Bradley Hand','Comic Sans MS',cursive">Hand</button>
+      <button data-v="sans">Sans</button><button data-v="serif" style="font-family:Georgia,serif">Serif</button>
+      <button data-v="mono" style="font-family:ui-monospace,Menlo,Consolas,monospace">Mono</button></div></div>
+    <div class="p-sec"><label>Font size <b id="v-fs"></b></label>
+      <div class="seg" id="seg-fs"><button data-v="16">S</button><button data-v="24">M</button><button data-v="36">L</button><button data-v="56">XL</button></div>
+      <input type="range" id="r-fs" min="8" max="200" step="1" style="margin-top:6px"></div>
+    <div class="p-sec"><label>Text align</label><div class="seg" id="seg-al">
+      <button data-v="left" id="al-l"></button><button data-v="center" id="al-c"></button><button data-v="right" id="al-r"></button></div></div>
   </div>
   <div class="p-sec" id="sec-arr"><label>Arrange</label><div class="arrange" id="arrange"></div></div>
 `;
@@ -817,8 +872,12 @@ function bindRange(id, vid, fmt, apply) {
 bindRange('#r-sw', '#v-sw', v => v + 'px', v => { S.style.sw = v; applyToSel(s => { s.sw = v; }); });
 bindRange('#r-rad', '#v-rad', v => v + 'px', v => { S.style.rr = v; applyToSel(s => { if (s.type === 'rect') s.r = v; }); });
 bindRange('#r-op', '#v-op', v => v + '%', v => { S.style.op = v; applyToSel(s => { s.op = v; }); });
-bindRange('#r-fs', '#v-fs', v => v + 'px', v => { S.style.fs = v; applyToSel(s => { if (s.type === 'text') s.fs = v; }); });
-$('#s-font').onchange = e => { S.style.font = e.target.value; applyToSel(s => { if (s.type === 'text') s.font = e.target.value; }); commit(); };
+const isTxt = s => s.type === 'text' || !!s.t;
+bindRange('#r-fs', '#v-fs', v => v + 'px', v => { S.style.fs = v; applyToSel(s => { if (isTxt(s)) s.fs = v; }); });
+$('#seg-fs').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.style.fs = +b.dataset.v; applyToSel(s => { if (isTxt(s)) s.fs = +b.dataset.v; }); commit(); };
+$('#seg-font').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.style.font = b.dataset.v; applyToSel(s => { if (isTxt(s)) s.font = b.dataset.v; }); commit(); };
+$('#seg-al').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.style.align = b.dataset.v; applyToSel(s => { if (isTxt(s)) s.al = b.dataset.v; }); commit(); };
+$('#al-l').innerHTML = icon('alignl', 16); $('#al-c').innerHTML = icon('alignc', 16); $('#al-r').innerHTML = icon('alignr', 16);
 $('#seg-dash').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.style.dash = b.dataset.v; applyToSel(s => { s.dash = b.dataset.v; }); commit(); };
 $('#seg-join').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.style.join = b.dataset.v; applyToSel(s => { s.join = b.dataset.v; }); commit(); };
 
@@ -855,8 +914,11 @@ function refreshProps() {
   set('#r-op', '#v-op', val('op'), v => v + '%');
   const rect = selShapes().find(s => s.type === 'rect');
   set('#r-rad', '#v-rad', rect ? rect.r || 0 : st.rr, v => v + 'px');
-  set('#r-fs', '#v-fs', (selShapes().find(s => s.type === 'text') || st).fs, v => v + 'px');
-  $('#s-font').value = (selShapes().find(s => s.type === 'text') || st).font;
+  const tx = selShapes().find(isTxt) || st;
+  set('#r-fs', '#v-fs', tx.fs, v => v + 'px');
+  $('#seg-fs').querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.v === tx.fs));
+  $('#seg-font').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === tx.font));
+  $('#seg-al').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === (tx.al || (tx === st ? st.align : 'center'))));
   $('#seg-dash').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === val('dash')));
   $('#seg-join').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === (val('join') || 'miter')));
   const tl = TOOLS.find(t => t.id === S.tool);
@@ -864,7 +926,7 @@ function refreshProps() {
   const showRad = types.includes('rect');
   $('#sec-rad').style.display = showRad ? '' : 'none';
   $('#sec-join').style.display = types.some(t => BOX.has(t)) ? '' : 'none';
-  $('#sec-text').style.display = types.includes('text') ? '' : 'none';
+  $('#sec-text').style.display = (types.includes('text') || selShapes().some(isTxt)) ? '' : 'none';
   $('#sec-arr').style.display = first ? '' : 'none';
   markLayers();
 }
@@ -1000,40 +1062,64 @@ function nudge(dx, dy) { if (!S.sel.size) return; selShapes().forEach(s => moveS
 
 /* ============================== text editing ============================== */
 const ta = $('#texted');
-function openText(shape, wp) {
+function openText(shape, wp, box) {
   const st = S.style;
-  const base = shape || { fs: st.fs, font: st.font, fill: st.fill || st.stroke || '#1e1e1e', x: wp.x, y: wp.y, text: '' };
-  S.editing = { shape, x: base.x, y: base.y, base };
-  const p = toScreen(base.x, base.y);
+  let ed;
+  if (shape && shape.type === 'text') {
+    ed = { mode: 'text', shape, x: shape.x, y: shape.y, fs: shape.fs, font: shape.font, al: shape.al || 'left', color: shape.fill || shape.stroke || '#1e1e1e',
+      fixedW: shape.w || 0, fixedH: shape.h || 0, value: shape.text };
+  } else if (shape) {
+    const g = labelGeom(shape.t ? shape : { ...shape, t: ' ', fs: shape.fs || st.fs, font: shape.font || st.font });
+    ed = { mode: 'label', shape, fs: shape.fs || st.fs, font: shape.font || st.font, al: shape.al || 'center', color: labelColor(shape),
+      fixedW: g.fit, center: { x: g.cx, y: g.cy }, value: shape.t || '' };
+    hideLabelId = shape.id;
+  } else {
+    ed = { mode: 'new', shape: null, x: box ? box.x : wp.x, y: box ? box.y : wp.y, fs: st.fs, font: st.font, al: st.align || 'left',
+      color: st.fill || st.stroke || '#1e1e1e', fixedW: box ? box.w : 0, fixedH: box ? box.h : 0, box, value: '' };
+  }
+  S.editing = ed;
+  const z = S.cam.z, p = toScreen(ed.x || 0, ed.y || 0);
   ta.hidden = false;
-  ta.value = shape ? shape.text : '';
-  Object.assign(ta.style, { left: p.x + 'px', top: p.y + 'px', fontSize: base.fs * S.cam.z + 'px', fontFamily: FONTS[base.font] || FONTS.sans, color: base.fill || '#1e1e1e', lineHeight: '1.25' });
+  ta.value = ed.value;
+  Object.assign(ta.style, { left: p.x + 'px', top: p.y + 'px', fontSize: ed.fs * z + 'px', fontFamily: FONTS[ed.font] || FONTS.sans, color: ed.color,
+    lineHeight: '1.25', textAlign: ed.al, whiteSpace: ed.fixedW ? 'pre-wrap' : 'pre', overflowWrap: 'break-word' });
   sizeText();
   redraw(false);
   ta.focus(); ta.select();
   setTimeout(() => { if (S.editing && document.activeElement !== ta) { ta.focus(); ta.select(); } }, 0);
 }
 function sizeText() {
-  ta.style.width = '10px'; ta.style.height = '10px';
-  ta.style.width = Math.max(30, ta.scrollWidth + 6) + 'px'; ta.style.height = Math.max(ta.scrollHeight, 20) + 'px';
+  const ed = S.editing; if (!ed) return;
+  const z = S.cam.z;
+  if (ed.fixedW) ta.style.width = ed.fixedW * z + 'px';
+  else { ta.style.width = '10px'; ta.style.width = Math.max(30, ta.scrollWidth + 6) + 'px'; }
+  ta.style.height = '10px';
+  ta.style.height = Math.max(ta.scrollHeight, 20, (ed.fixedH || 0) * z) + 'px';
+  if (ed.center) {
+    const c = toScreen(ed.center.x, ed.center.y);
+    ta.style.left = c.x - ta.offsetWidth / 2 + 'px'; ta.style.top = c.y - ta.offsetHeight / 2 + 'px';
+  }
 }
 ta.addEventListener('input', sizeText);
 ta.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) ta.blur(); });
 ta.addEventListener('blur', () => commitText());
 function commitText() {
   const ed = S.editing; if (!ed) return;
-  S.editing = null; ta.hidden = true;
+  S.editing = null; ta.hidden = true; hideLabelId = null;
   const t = ta.value.replace(/\s+$/, '');
-  if (ed.shape) {
-    if (t) ed.shape.text = t;
-    else removeShape(ed.shape);
+  if (ed.mode === 'label') {
+    const s = ed.shape;
+    if (t) { s.t = t; s.fs = ed.fs; s.font = ed.font; s.al = ed.al; } else { delete s.t; delete s.al; }
+  } else if (ed.mode === 'text') {
+    if (t) ed.shape.text = t; else removeShape(ed.shape);
   } else if (t) {
-    const s = { id: uid(), type: 'text', x: ed.x, y: ed.y, text: t, fs: ed.base.fs, font: ed.base.font, fill: ed.base.fill, stroke: ed.base.fill, sw: 0, op: S.style.op, dash: 'solid' };
-    const l = addShape(s); l.name = 'Text: ' + (t.split('\n')[0].slice(0, 18));
+    const s = { id: uid(), type: 'text', x: ed.x, y: ed.y, text: t, fs: ed.fs, font: ed.font, al: ed.al, fill: ed.color, stroke: ed.color, sw: 0, op: S.style.op, dash: 'solid' };
+    if (ed.box) { s.w = ed.box.w; s.h = ed.box.h; }
+    const l = addShape(s); l.name = 'Text: ' + t.split('\n')[0].slice(0, 18);
     S.sel = new Set([s.id]);
   }
   commit();
-  if (!ed.shape && t) afterCreate();
+  if (ed.mode === 'new' && t) afterCreate();
 }
 
 /* ============================== pen tool ============================== */
@@ -1140,8 +1226,8 @@ board.addEventListener('pointerdown', e => {
   if (S.tool === 'text') {
     const hit = pickAt(wp.x, wp.y);
     e.preventDefault();
-    if (hit && hit.s.type === 'text') { S.sel = new Set([hit.s.id]); openText(hit.s); }
-    else openText(null, { x: snap(wp.x), y: snap(wp.y) });
+    if (hit) { S.sel = new Set([hit.s.id]); S.doc.active = hit.l.id; refreshProps(); openText(hit.s); }
+    else S.drag = { k: 'textbox', a: wp, b: wp, sa: { sx, sy } };
     return;
   }
   if (S.tool === 'pen') {
@@ -1232,12 +1318,15 @@ board.addEventListener('pointermove', e => {
       if (h.includes('w')) x1 = px; if (h.includes('e')) x2 = px;
       if (h.includes('n')) y1 = py; if (h.includes('s')) y2 = py;
       let nb = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.max(1, Math.abs(x2 - x1)), h: Math.max(1, Math.abs(y2 - y1)) };
-      const texty = [...d.orig.values()].some(o => o.type === 'text');
-      if ((e.shiftKey || texty) && h.length === 2 && ob.w && ob.h) { // corner: keep aspect
+      const origs = [...d.orig.values()], texty = origs.some(o => o.type === 'text');
+      if (origs.every(o => o.type === 'text') && ob.w && ob.h) { // text scales uniformly with its box
+        const k = h.length === 2 ? Math.max(nb.w / ob.w, nb.h / ob.h) : (h === 'e' || h === 'w') ? nb.w / ob.w : nb.h / ob.h;
+        nb = { w: ob.w * k, h: ob.h * k, x: h.includes('w') ? ob.x + ob.w - ob.w * k : ob.x, y: h.includes('n') ? ob.y + ob.h - ob.h * k : ob.y };
+      } else if ((e.shiftKey || texty) && h.length === 2 && ob.w && ob.h) { // corner: keep aspect
         const k = Math.max(nb.w / ob.w, nb.h / ob.h);
         nb.w = ob.w * k; nb.h = ob.h * k;
         nb.x = h.includes('w') ? ob.x + ob.w - nb.w : ob.x; nb.y = h.includes('n') ? ob.y + ob.h - nb.h : ob.y;
-      } else if (texty) { nb = { ...ob }; }
+      }
       for (const id of S.sel) { const o = findShape(id); if (o && d.orig.has(id)) { Object.assign(o.s, clone(d.orig.get(id))); mapShape(o.s, ob, nb); } }
       redraw(); break;
     }
@@ -1249,6 +1338,7 @@ board.addEventListener('pointermove', e => {
       else { n.ox = n.x - px; n.oy = n.y - py; }
       redraw(); break;
     }
+    case 'textbox': d.b = wp; redraw(false); break;
     case 'marquee': {
       d.b = wp;
       const r = { x: Math.min(d.a.x, d.b.x), y: Math.min(d.a.y, d.b.y), w: Math.abs(d.a.x - d.b.x), h: Math.abs(d.a.y - d.b.y) };
@@ -1290,6 +1380,13 @@ function endDrag() {
     case 'move': if (d.moved) commit(); else { refreshProps(); } break;
     case 'resize': case 'node': commit(); break;
     case 'marquee': refreshProps(); redraw(false); break;
+    case 'textbox': {
+      const a = { x: snap(d.a.x), y: snap(d.a.y) }, b = { x: snap(d.b.x), y: snap(d.b.y) };
+      if (Math.hypot(d.b.x - d.a.x, d.b.y - d.a.y) * S.cam.z > 8)
+        openText(null, null, { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.max(30, Math.abs(a.x - b.x)), h: Math.max(20, Math.abs(a.y - b.y)) });
+      else openText(null, a);
+      redraw(false); break;
+    }
   }
 }
 board.addEventListener('pointerup', endDrag);
@@ -1309,7 +1406,8 @@ board.addEventListener('dblclick', e => {
     commit(); return;
   }
   const hit = pickAt(wp.x, wp.y);
-  if (hit && hit.s.type === 'text') { setTool('text'); S.sel = new Set([hit.s.id]); openText(hit.s); }
+  if (hit) { S.sel = new Set([hit.s.id]); S.doc.active = hit.l.id; refreshProps(); openText(hit.s); }
+  else openText(null, { x: snap(wp.x), y: snap(wp.y) });
 });
 
 board.addEventListener('wheel', e => {
@@ -1362,7 +1460,7 @@ window.addEventListener('keydown', e => {
   else if (k === 'n') { S.grid.on = !S.grid.on; syncGrid(); redraw(false); persist(); }
 });
 window.addEventListener('keyup', e => {
-  if (e.key === ' ') { S.space = false; setTool(S.tool); }
+  if (e.key === ' ' && S.space) { S.space = false; board.style.cursor = S.tool === 'hand' ? 'grab' : S.tool === 'select' ? 'default' : S.tool === 'text' ? 'text' : 'crosshair'; }
 });
 window.addEventListener('paste', e => {
   if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
