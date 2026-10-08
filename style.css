@@ -31,9 +31,7 @@ svg { display: block; pointer-events: none; }
 .ib.on { background: var(--accent-soft); color: var(--accent); }
 .ib:disabled { opacity: .35; cursor: default; }
 .ib small { position: absolute; right: 1px; bottom: 0; font-size: 8px; font-weight: 700; letter-spacing: .3px; color: var(--muted); }
-.ib.primary { background: var(--accent); color: #fff; width: 44px; height: 44px; border-radius: 11px; }
-.ib.primary:hover { background: #3b5bdb; }
-.ib.primary.ok { background: #2f9e44; }
+.ib.ok { color: #2f9e44; }
 .sep { width: 1px; align-self: stretch; background: var(--line); margin: 4px 3px; }
 .chip { height: 28px; min-width: 34px; padding: 0 8px; border: 1px solid var(--line); background: #fff; border-radius: 8px;
   font-weight: 600; font-size: 12px; color: #374151; }
@@ -77,9 +75,12 @@ select { width: 100%; height: 28px; border: 1px solid var(--line); border-radius
 .arrange .ib { width: 32px; height: 32px; }
 
 /* top / export / zoom bars */
-#topbar { left: 50%; transform: translateX(-50%); top: 12px; padding: 4px; display: flex; align-items: center; gap: 2px; }
-#exportbar { right: 12px; top: 12px; padding: 5px; display: flex; align-items: center; gap: 3px; }
-#exportbar .chip { margin: 0 1px; }
+#topbar { left: 50%; transform: translateX(-50%); top: 12px; padding: 2px 3px; display: flex; align-items: center; gap: 0; border-radius: 10px; }
+#exportbar { right: 12px; top: 12px; padding: 2px 3px; display: flex; align-items: center; gap: 0; border-radius: 10px; }
+#exportbar .chip { margin: 0 1px; height: 24px; min-width: 0; padding: 0 6px; font-size: 11px; border-radius: 6px; }
+#topbar .ib, #exportbar .ib { width: 28px; height: 28px; border-radius: 7px; }
+#topbar .ib svg, #exportbar .ib svg { width: 17px; height: 17px; }
+#topbar .sep, #exportbar .sep { margin: 5px 2px; }
 #zoombar { left: 12px; bottom: 12px; padding: 4px; display: flex; align-items: center; gap: 2px; }
 #zoombar .ib { width: 32px; height: 32px; }
 #zoombar .zv { min-width: 52px; font-weight: 600; background: none; border: 0; border-radius: 8px; height: 32px; }
@@ -105,13 +106,13 @@ select { width: 100%; height: 28px; border: 1px solid var(--line); border-radius
 #layer-list { flex: 1; overflow: auto; padding: 2px 8px 6px; }
 #layer-actions, #pv-actions { display: flex; gap: 2px; padding: 4px 8px 8px; align-items: center; }
 #layer-actions .ib, #pv-actions .ib { width: 32px; height: 32px; }
-.layer { display: flex; align-items: center; gap: 6px; height: 46px; padding: 0 4px 0 6px; margin-bottom: 3px; border-radius: 9px;
+.layer { display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 4px 0 6px; margin-bottom: 3px; border-radius: 9px;
   background: #fff; border: 1px solid var(--line); cursor: pointer; user-select: none; }
 .layer:hover { border-color: var(--line-2); }
 .layer.active { border-color: var(--accent); background: var(--accent-soft); }
 .layer.hidden { opacity: .55; }
 .layer.dragover { box-shadow: 0 -3px 0 var(--accent); }
-.layer canvas { width: 40px; height: 32px; border-radius: 4px; border: 1px solid var(--line); flex: none;
+.layer canvas { width: 36px; height: 28px; border-radius: 4px; border: 1px solid var(--line); flex: none;
   background: repeating-conic-gradient(#e9ecef 0 25%, #fff 0 50%) 0 0 / 10px 10px; }
 .layer .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .layer input.rename { flex: 1; min-width: 0; font: inherit; font-weight: 600; border: 1px solid var(--accent); border-radius: 5px; padding: 2px 4px; }
