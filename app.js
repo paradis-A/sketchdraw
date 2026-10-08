@@ -56,6 +56,8 @@ const ICONS = {
   alignc: '<path d="M4 6h16M7 12h10M5 18h14"/>',
   alignr: '<path d="M4 6h16M10 12h10M6 18h14"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M21 16l-5-5-8 9"/>',
+  floppy: '<path d="M5 3h11l4 4v13a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1z"/><path d="M8 3v5h7V3M7 21v-7h10v7"/>',
+  crop: '<path d="M6 2v14a2 2 0 002 2h14M2 6h14a2 2 0 012 2v14"/>',
   tolayer: '<path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/>',
 };
 const icon = (n, size = 20) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n]}</svg>`;
@@ -359,7 +361,12 @@ function drawShape(ctx, s, alpha = 1) {
   const p = new Path2D(pathD(s));
   if (s.type === 'image') {
     const im = getImg(s.imgId);
-    if (im) { ctx.imageSmoothingEnabled = !s.px; ctx.drawImage(im, s.x, s.y, s.w, s.h); }
+    if (im) {
+      ctx.imageSmoothingEnabled = !s.px;
+      const c = s.c, nw = im.naturalWidth, nh = im.naturalHeight, r = v => (s.px ? Math.round(v) : v);
+      if (c) ctx.drawImage(im, r(c.x * nw), r(c.y * nh), Math.max(1, r(c.w * nw)), Math.max(1, r(c.h * nh)), s.x, s.y, s.w, s.h);
+      else ctx.drawImage(im, s.x, s.y, s.w, s.h);
+    }
     else { ctx.fillStyle = '#eceef2'; ctx.fill(p); }
   }
   if (s.fill && fillable(s)) { ctx.fillStyle = s.fill; ctx.fill(p); }
@@ -470,6 +477,7 @@ function commit() {
   changed();
 }
 function restore(j) {
+  S.crop = null;
   S.doc = JSON.parse(j);
   if (!layerById(S.doc.active)) S.doc.active = S.doc.layers[S.doc.layers.length - 1].id;
   for (const id of [...S.sel]) if (!findShape(id)) S.sel.delete(id);
@@ -542,6 +550,68 @@ function selFrame() {
 }
 const rotHandlePos = fr => rotAbout(fr.cx, fr.ob.y - 6 / S.cam.z - 26 / S.cam.z, fr.cx, fr.cy, fr.a);
 
+/* ---- non-destructive image crop: the crop window moves/resizes over the full source image ---- */
+const CROP_MIN = 4;
+function cropLocal(wp) { const c = S.crop; return c.a ? rotAbout(wp.x, wp.y, c.c0.x, c.c0.y, -c.a) : wp; }
+function cropHandles(w) {
+  const mx = w.x + w.w / 2, my = w.y + w.h / 2, x2 = w.x + w.w, y2 = w.y + w.h;
+  return [['nw', w.x, w.y], ['n', mx, w.y], ['ne', x2, w.y], ['e', x2, my], ['se', x2, y2], ['s', mx, y2], ['sw', w.x, y2], ['w', w.x, my]].map(([n, x, y]) => ({ n, x, y }));
+}
+function enterCrop(s) {
+  if (S.editing) commitText();
+  const c = s.c || { x: 0, y: 0, w: 1, h: 1 }, fw = s.w / c.w, fh = s.h / c.h;
+  S.crop = { s, a: s.a || 0, c0: centerOf(bounds(s)), win: { x: s.x, y: s.y, w: s.w, h: s.h }, full: { x: s.x - c.x * fw, y: s.y - c.y * fh, w: fw, h: fh } };
+  S.sel = new Set([s.id]); S.drag = null;
+  board.style.cursor = 'default';
+  const h = $('#hint'); h.textContent = 'Drag the handles to crop · drag inside to move the window · Enter to apply · Esc to cancel';
+  h.classList.add('show'); clearTimeout(h._t); h._t = setTimeout(() => h.classList.remove('show'), 5000);
+  redraw(false);
+}
+function setImageRect(s, r, c0, a) { // place the displayed rect r (local frame) and keep rotation about the old center consistent
+  s.x = r.x; s.y = r.y; s.w = r.w; s.h = r.h;
+  if (a) { const c1 = centerOf(r), p = rotAbout(c1.x, c1.y, c0.x, c0.y, a); moveShape(s, p.x - c1.x, p.y - c1.y); }
+}
+function commitCrop() {
+  const k = S.crop; if (!k) return;
+  S.crop = null;
+  const { win, full, s } = k;
+  s.c = { x: (win.x - full.x) / full.w, y: (win.y - full.y) / full.h, w: win.w / full.w, h: win.h / full.h };
+  if (s.c.x < 1e-4 && s.c.y < 1e-4 && s.c.w > 0.9999 && s.c.h > 0.9999) delete s.c;
+  setImageRect(s, win, k.c0, k.a);
+  commit();
+}
+function cancelCrop() { S.crop = null; redraw(false); refreshProps(); }
+function resetCrop(s) {
+  if (!s.c) return;
+  const c = s.c, fw = s.w / c.w, fh = s.h / c.h, c0 = centerOf(bounds(s));
+  const a = s.a || 0;
+  delete s.c;
+  setImageRect(s, { x: s.x - c.x * fw, y: s.y - c.y * fh, w: fw, h: fh }, c0, a);
+  commit();
+}
+function drawCropOverlay(lw) {
+  const k = S.crop, z = S.cam.z, im = getImg(k.s.imgId), { win, full } = k;
+  ctx.save();
+  if (k.a) { ctx.translate(k.c0.x, k.c0.y); ctx.rotate(k.a); ctx.translate(-k.c0.x, -k.c0.y); }
+  if (im) {
+    ctx.imageSmoothingEnabled = !k.s.px;
+    ctx.globalAlpha = 0.3; ctx.drawImage(im, full.x, full.y, full.w, full.h); ctx.globalAlpha = 1;
+    ctx.save(); ctx.beginPath(); ctx.rect(win.x, win.y, win.w, win.h); ctx.clip();
+    ctx.drawImage(im, full.x, full.y, full.w, full.h); ctx.restore();
+  }
+  ctx.strokeStyle = '#4c6ef5'; ctx.lineWidth = lw;
+  ctx.setLineDash([4 / z, 3 / z]); ctx.strokeRect(full.x, full.y, full.w, full.h); ctx.setLineDash([]);
+  ctx.strokeRect(win.x, win.y, win.w, win.h);
+  ctx.globalAlpha = 0.5; ctx.lineWidth = lw * 0.6;
+  for (let i = 1; i < 3; i++) {
+    ctx.beginPath(); ctx.moveTo(win.x + win.w * i / 3, win.y); ctx.lineTo(win.x + win.w * i / 3, win.y + win.h);
+    ctx.moveTo(win.x, win.y + win.h * i / 3); ctx.lineTo(win.x + win.w, win.y + win.h * i / 3); ctx.stroke();
+  }
+  ctx.globalAlpha = 1; ctx.lineWidth = lw;
+  for (const h of cropHandles(win)) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.rect(h.x - 4 / z, h.y - 4 / z, 8 / z, 8 / z); ctx.fill(); ctx.stroke(); }
+  ctx.restore();
+}
+
 function render() {
   const D = dpr(), z = S.cam.z;
   ctx.setTransform(D, 0, 0, D, 0, 0);
@@ -555,12 +625,14 @@ function render() {
     for (let x = ox; x < view.w; x += step) for (let y = oy; y < view.h; y += step) ctx.fillRect(x - .75, y - .75, 1.5, 1.5);
   }
   ctx.setTransform(D * z, 0, 0, D * z, D * S.cam.x, D * S.cam.y);
-  for (const l of S.doc.layers) if (l.visible) drawShapes(ctx, l.shapes, l.opacity / 100, S.editing && S.editing.mode === 'text' && S.editing.shape.id);
+  const skipId = S.crop ? S.crop.s.id : (S.editing && S.editing.mode === 'text' ? S.editing.shape.id : null);
+  for (const l of S.doc.layers) if (l.visible) drawShapes(ctx, l.shapes, l.opacity / 100, skipId);
 
   const lw = 1.5 / z;
   // selection
   const sel = selShapes();
-  if (sel.length && !S.draft) {
+  if (S.crop) drawCropOverlay(lw);
+  if (sel.length && !S.draft && !S.crop) {
     ctx.save();
     ctx.strokeStyle = '#4c6ef5'; ctx.lineWidth = lw;
     const pad = 3 / z;
@@ -783,6 +855,7 @@ toolbar.appendChild(lockBtn);
 
 function setTool(id) {
   if (S.editing) commitText();
+  if (S.crop) commitCrop();
   if (S.draft) finishPen(false);
   S.tool = id;
   document.querySelectorAll('#toolbar [data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === id));
@@ -811,7 +884,7 @@ topbar.append(
   mkBtn('ib', 'redo', 'Redo (Ctrl+Shift+Z)', redo, 'b-redo'),
   sepEl(),
   mkBtn('ib', 'open', 'Open project…', () => $('#openfile').click()),
-  mkBtn('ib', 'save', 'Save project file (.json)', saveProject),
+  mkBtn('ib', 'floppy', 'Save project file (.json)', saveProject),
   mkBtn('ib', 'trash', 'Clear everything', () => { if (confirm('Clear all layers and start over?')) newDoc(); }),
 );
 function updateTopbar() {
@@ -892,7 +965,8 @@ props.innerHTML = `
     <div class="seg" id="seg-join"><button data-v="miter">Sharp</button><button data-v="round">Round</button></div></div>
   <div class="p-sec" id="sec-angle"><label>Rotation <b id="v-an"></b></label><input type="range" id="r-an" min="-180" max="180" step="1"></div>
   <div class="p-sec" id="sec-img"><label>Image scaling</label>
-    <div class="seg" id="seg-px"><button data-v="smooth">Smooth</button><button data-v="crisp">Crisp pixels</button></div></div>
+    <div class="seg" id="seg-px"><button data-v="smooth">Smooth</button><button data-v="crisp">Crisp pixels</button></div>
+    <div class="seg" style="margin-top:6px"><button id="btn-crop" title="Crop (double-click the image or press Enter)">Crop…</button><button id="btn-crop-reset">Reset crop</button></div></div>
   <div class="p-sec"><label>Opacity <b id="v-op"></b></label><input type="range" id="r-op" min="5" max="100" step="5"></div>
   <div id="sec-text">
     <div class="p-sec"><label>Font family</label><div class="seg" id="seg-font">
@@ -951,6 +1025,8 @@ bindRange('#r-rad', '#v-rad', v => v + 'px', v => { S.style.rr = v; applyToSel(s
 bindRange('#r-op', '#v-op', v => v + '%', v => { S.style.op = v; applyToSel(s => { s.op = v; }); });
 bindRange('#r-an', '#v-an', v => v + '°', v => { applyToSel(s => { if (v) s.a = v * Math.PI / 180; else delete s.a; }); });
 $('#seg-px').onclick = e => { const b = e.target.closest('button'); if (!b) return; applyToSel(s => { if (s.type === 'image') s.px = b.dataset.v === 'crisp'; }); commit(); };
+$('#btn-crop').onclick = () => { const i = selShapes().find(x => x.type === 'image'); if (i) enterCrop(i); };
+$('#btn-crop-reset').onclick = () => { selShapes().filter(x => x.type === 'image').forEach(resetCrop); };
 const isTxt = s => s.type === 'text' || !!s.t;
 bindRange('#r-fs', '#v-fs', v => v + 'px', v => { S.style.fs = v; applyToSel(s => { if (isTxt(s)) s.fs = v; }); });
 $('#seg-fs').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.style.fs = +b.dataset.v; applyToSel(s => { if (isTxt(s)) s.fs = +b.dataset.v; }); commit(); };
@@ -1317,6 +1393,16 @@ board.addEventListener('pointerdown', e => {
   }
   if (e.button !== 0) return;
 
+  if (S.crop) {
+    const k = S.crop, lp = cropLocal(wp), tol = 9 / S.cam.z;
+    const h = cropHandles(k.win).find(h => Math.abs(h.x - lp.x) <= tol && Math.abs(h.y - lp.y) <= tol);
+    const inside = lp.x >= k.win.x && lp.x <= k.win.x + k.win.w && lp.y >= k.win.y && lp.y <= k.win.y + k.win.h;
+    if (h) S.drag = { k: 'cropresize', h: h.n, w0: { ...k.win } };
+    else if (inside) S.drag = { k: 'cropmove', start: lp, w0: { ...k.win } };
+    else commitCrop();
+    return;
+  }
+
   if (S.tool === 'select') {
     const nh = hitNode(wp);
     if (nh) { bakePath(nh.s); S.drag = { k: 'node', ...nh }; return; }
@@ -1409,6 +1495,12 @@ board.addEventListener('pointermove', e => {
   const { sx, sy } = evPos(e), wp = toWorld(sx, sy);
   const d = S.drag;
   if (S.draft) { S.draft.cursor = { x: snap(wp.x), y: snap(wp.y) }; redraw(false); }
+  if (S.crop && !d) {
+    const k = S.crop, lp = cropLocal(wp), tol = 9 / S.cam.z;
+    const h = cropHandles(k.win).find(h => Math.abs(h.x - lp.x) <= tol && Math.abs(h.y - lp.y) <= tol);
+    board.style.cursor = h ? HANDLE_CURSOR[h.n] : (lp.x >= k.win.x && lp.x <= k.win.x + k.win.w && lp.y >= k.win.y && lp.y <= k.win.y + k.win.h) ? 'move' : 'default';
+    return;
+  }
   if (!d) {
     if (S.tool === 'select') {
       const hn = hitHandle(wp);
@@ -1504,6 +1596,20 @@ board.addEventListener('pointermove', e => {
       else { n.ox = n.x - px; n.oy = n.y - py; }
       redraw(); break;
     }
+    case 'cropresize': {
+      const k = S.crop, f = k.full, lp = cropLocal(wp), h = d.h, w0 = d.w0;
+      let x1 = w0.x, y1 = w0.y, x2 = w0.x + w0.w, y2 = w0.y + w0.h;
+      const px = clamp(lp.x, f.x, f.x + f.w), py = clamp(lp.y, f.y, f.y + f.h);
+      if (h.includes('w')) x1 = Math.min(px, x2 - CROP_MIN); if (h.includes('e')) x2 = Math.max(px, x1 + CROP_MIN);
+      if (h.includes('n')) y1 = Math.min(py, y2 - CROP_MIN); if (h.includes('s')) y2 = Math.max(py, y1 + CROP_MIN);
+      k.win = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+      redraw(false); break;
+    }
+    case 'cropmove': {
+      const k = S.crop, f = k.full, lp = cropLocal(wp), w0 = d.w0;
+      k.win = { ...w0, x: clamp(w0.x + lp.x - d.start.x, f.x, f.x + f.w - w0.w), y: clamp(w0.y + lp.y - d.start.y, f.y, f.y + f.h - w0.h) };
+      redraw(false); break;
+    }
     case 'textbox': d.b = wp; redraw(false); break;
     case 'marquee': {
       d.b = wp;
@@ -1574,6 +1680,7 @@ board.addEventListener('dblclick', e => {
     commit(); return;
   }
   const hit = pickAt(wp.x, wp.y);
+  if (hit && hit.s.type === 'image') { S.sel = new Set([hit.s.id]); S.doc.active = hit.l.id; refreshProps(); enterCrop(hit.s); return; }
   if (hit) { S.sel = new Set([hit.s.id]); S.doc.active = hit.l.id; refreshProps(); openText(hit.s); }
   else openText(null, { x: snap(wp.x), y: snap(wp.y) });
 });
@@ -1607,6 +1714,11 @@ window.addEventListener('keydown', e => {
     else if (e.key === '[') { e.preventDefault(); reorder(e.shiftKey ? 'bottom' : 'back'); }
     return;
   }
+  if (S.crop) {
+    if (e.key === 'Enter') commitCrop(); else if (e.key === 'Escape') cancelCrop();
+    return;
+  }
+  if (e.key === 'Enter' && S.sel.size === 1 && selShapes()[0].type === 'image') { e.preventDefault(); enterCrop(selShapes()[0]); return; }
   if (e.key === 'Escape') {
     if (S.draft) finishPen(false);
     else { S.sel.clear(); refreshProps(); redraw(false); setTool('select'); }
